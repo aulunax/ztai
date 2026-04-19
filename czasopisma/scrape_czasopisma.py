@@ -198,20 +198,99 @@ def _is_bottom_annotation(line: PdfLine, body_size: float) -> bool:
         return True
     return True
 
+def _is_back_matter_anchor(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(Streszczenie|Summary|S\w*owa\s+kluczowe|Keywords|Literatura|Bibliografia|Data\s+wp\w+yni\w+cia|Data\s+zaakceptowania|Conflict\s+of\s+interest|Finansowanie\s+bada\w+|A\s+Member\s+of\s+a\s+Company(?:’|')?s\s+Management\s+Board)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _is_front_matter_meta_line(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return True
+
+    return bool(
+        re.search(
+            r"(?:\b(?:e?ISSN|ORCID|Creative\s+Commons|Libre\s+Open\s+Access|doi\.org|https?://doi\.org|e-?mail|email)\b|"
+            r"Artyku\w*\s+zosta\w*\s+opublikowan\w*|"
+            r"obj\w*ty\s+warunkami\s+licencji|"
+            r"\b26\.\d+\s*/\s*\d{4},\s*s\.\s*\d+|"
+            r"\b(?:Data\s+wp\w+yni\w+cia|Data\s+zaakceptowania|Received|Accepted)\b)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _is_body_paragraph_line(line: PdfLine, body_size: float) -> bool:
+    text = line.text.strip()
+    if len(text) < 35:
+        return False
+    if not re.search(r"[a-ząćęłńóśźż]", text, flags=re.IGNORECASE):
+        return False
+    if _is_front_matter_meta_line(text):
+        return False
+    return body_size - 0.3 <= line.size <= body_size + 0.6
+
+
+def _is_title_block_line(line: PdfLine, body_size: float) -> bool:
+    text = line.text.strip()
+    if not text:
+        return False
+    if _is_front_matter_meta_line(text):
+        return False
+
+    alpha = sum(1 for char in text if char.isalpha())
+    upper = sum(1 for char in text if char.isupper())
+    uppercase_ratio = upper / max(1, alpha)
+
+    return bool(
+        re.match(r"^\d+\.\s+\S", text)
+        or line.size >= body_size + 0.7
+        or (line.is_centered and line.size >= body_size + 0.3 and len(text) <= 180)
+        or (uppercase_ratio >= 0.6 and len(text) >= 8)
+        or (
+            len(text) <= 90
+            and line.size >= body_size - 0.1
+            and text[:1].isupper()
+            and not re.search(r"[\.!?;:]$", text)
+            and not re.search(r"://|@", text)
+        )
+    )
+
 
 def _drop_first_page_front_matter(lines: list[PdfLine], body_size: float) -> list[PdfLine]:
     if not lines:
         return lines
 
+    # Find first regular paragraph line, then walk back to keep just the nearby title block.
+    body_idx = None
+    for i, line in enumerate(lines):
+        if _is_body_paragraph_line(line, body_size):
+            body_idx = i
+            break
+
+    if body_idx is not None:
+        start_idx = body_idx
+        j = body_idx - 1
+        while j >= 0:
+            line = lines[j]
+            if _is_title_block_line(line, body_size):
+                start_idx = j
+                j -= 1
+                continue
+            break
+
+        return lines[start_idx:]
+
+    # Fallback for unusual first pages with no paragraph-like line.
     title_start = None
     for i, line in enumerate(lines):
-        if not (line.size >= body_size + 0.8 and line.is_centered and len(line.text) >= 18):
-            continue
-
-        alpha = sum(1 for char in line.text if char.isalpha())
-        upper = sum(1 for char in line.text if char.isupper())
-        uppercase_ratio = upper / max(1, alpha)
-        if uppercase_ratio > 0.72:
+        if _is_title_block_line(line, body_size):
             title_start = i
             break
 
@@ -242,6 +321,11 @@ def _find_cutoff_after_last_numbered_section(lines: list[PdfLine], body_size: fl
 
         if idx - last_idx < 8 or chars_after_last_heading < 900:
             continue
+
+        window = " ".join(lines[j].text for j in range(idx, min(idx + 4, len(lines))))
+        if _is_back_matter_anchor(window):
+            return idx
+
         if re.match(r"^\d+\.\s+\S", line.text):
             continue
         if line.size < body_size - 0.1:
@@ -253,13 +337,10 @@ def _find_cutoff_after_last_numbered_section(lines: list[PdfLine], body_size: fl
         if not heading_like:
             continue
 
-        nxt = lines[idx + 1] if idx + 1 < len(lines) else None
-        if nxt and nxt.size >= body_size - 0.3 and (nxt.is_centered or (nxt.top - line.bottom) < body_size * 1.2):
-            return idx
-        if nxt and nxt.size <= body_size - 1.0:
-            return idx
         if gap >= body_size * 1.9:
-            return idx
+            window = " ".join(lines[j].text for j in range(idx, min(idx + 4, len(lines))))
+            if _is_back_matter_anchor(window):
+                return idx
 
     return len(lines)
 
@@ -267,6 +348,13 @@ def _find_cutoff_after_last_numbered_section(lines: list[PdfLine], body_size: fl
 def _normalize_hyphenation_and_spacing(text: str) -> str:
     text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    text = re.sub(
+        r"(?<=[a-ząćęłńóśźż])(?:\s+\d{1,3}){1,3}(?=\s+[a-ząćęłńóśźż])",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"(?<=[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż])\d{1,2}(?=[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż])", "", text)
     text = re.sub(r"\s+([,\.;:!?\)])", r"\1", text)
     text = re.sub(r"([\(\[])\s+", r"\1", text)
     text = re.sub(r"[ \t]+", " ", text)
