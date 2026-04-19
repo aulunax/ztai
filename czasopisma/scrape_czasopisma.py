@@ -9,6 +9,7 @@ import concurrent.futures as cf
 import csv
 import json
 import logging
+from pathlib import Path
 import re
 import sys
 import threading
@@ -771,6 +772,133 @@ class CzasopismaScraper:
         )
         return rights or None
 
+    def _extract_licence_source_urls(self, soup: BeautifulSoup, page_url: str) -> list[str]:
+        urls: list[str] = []
+
+        for a_tag in soup.select("a[href]"):
+            href = a_tag.get("href", "").strip()
+            if not href:
+                continue
+
+            absolute = urljoin(page_url, href)
+            href_lower = absolute.lower()
+            text_lower = a_tag.get_text(" ", strip=True).lower()
+
+            rel_attr = a_tag.get("rel")
+            if isinstance(rel_attr, list):
+                rel_text = " ".join(str(item) for item in rel_attr).lower()
+            else:
+                rel_text = str(rel_attr or "").lower()
+
+            if (
+                "creativecommons.org" in href_lower
+                or "license" in rel_text
+                or "licenc" in text_lower
+                or "license" in text_lower
+            ):
+                urls.append(absolute)
+
+        rights = self._extract_licence_info(soup) or ""
+        for match in re.finditer(r"https?://\S+", rights):
+            urls.append(match.group(0).rstrip(".,;:)]}\"'"))
+
+        inferred_cc_url = self._infer_creative_commons_url(rights)
+        if inferred_cc_url:
+            urls.append(inferred_cc_url)
+
+        return self._dedupe_keep_order(urls)
+
+    @staticmethod
+    def _infer_creative_commons_url(licence_info: str | None) -> str | None:
+        if not licence_info:
+            return None
+
+        code_match = re.search(r"\bCC\s*BY(?:-[A-Z]{2}){0,2}\b", licence_info, flags=re.IGNORECASE)
+        if not code_match:
+            return None
+
+        cc_code = code_match.group(0).upper().replace("CC", "").replace(" ", "").strip("-").lower()
+        if not cc_code:
+            return None
+
+        version_match = re.search(r"\b([1-9](?:\.\d+)?)\b", licence_info)
+        version = version_match.group(1) if version_match else "4.0"
+        return f"https://creativecommons.org/licenses/{cc_code}/{version}/"
+
+    @staticmethod
+    def _article_id_from_url(article_url: str) -> str | None:
+        match = ARTICLE_VIEW_RE.search(article_url)
+        if not match:
+            return None
+        return match.group(1)
+
+    @staticmethod
+    def _safe_path_part(value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+        cleaned = cleaned.strip("._-")
+        return cleaned or "item"
+
+    def export_article_bundle(self, record: ArticleRecord, export_root: Path, index: int) -> None:
+        article_id = self._article_id_from_url(record.article_url) or f"idx_{index + 1:04d}"
+        folder_name = f"{index + 1:04d}_{self._safe_path_part(article_id)}"
+        article_dir = export_root / folder_name
+        article_dir.mkdir(parents=True, exist_ok=True)
+
+        issue_name = record.journal_name_with_issue or record.journal_name or ""
+        (article_dir / "issue_full_name.txt").write_text(issue_name.strip() + "\n", encoding="utf-8")
+
+        pdf_bytes: bytes | None = None
+        article_text = record.article_text
+        licence_info = record.licence_info
+
+        if record.pdf_download_url:
+            try:
+                pdf_bytes = self._fetch_pdf_bytes(record.pdf_download_url)
+                (article_dir / "article.pdf").write_bytes(pdf_bytes)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Failed to download PDF for %s: %s", record.article_url, exc)
+
+        if pdf_bytes and not article_text:
+            try:
+                extracted_text, pdf_licence_info = extract_article_content_from_pdf_bytes(pdf_bytes)
+                article_text = extracted_text or None
+                if pdf_licence_info:
+                    licence_info = pdf_licence_info
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Failed to extract article text during bundle export for %s: %s", record.article_url, exc)
+
+        (article_dir / "extracted_text.txt").write_text((article_text or "").strip() + "\n", encoding="utf-8")
+
+        licence_source_urls: list[str] = []
+        try:
+            soup = self._fetch_soup(record.article_url)
+            licence_source_urls = self._extract_licence_source_urls(soup, record.article_url)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to read licence source URLs for %s: %s", record.article_url, exc)
+
+        inferred_cc_url = self._infer_creative_commons_url(licence_info)
+        if inferred_cc_url:
+            licence_source_urls.append(inferred_cc_url)
+        licence_source_urls = self._dedupe_keep_order(licence_source_urls)
+
+        licence_lines = [
+            f"Article URL: {record.article_url}",
+            f"PDF URL: {record.pdf_download_url or ''}",
+            f"Licence: {licence_info or ''}",
+            "Licence source URLs:",
+        ]
+        if licence_source_urls:
+            for url in licence_source_urls:
+                licence_lines.append(f"- {url}")
+        else:
+            licence_lines.append("- (none found)")
+        (article_dir / "licence_and_sources.txt").write_text("\n".join(licence_lines) + "\n", encoding="utf-8")
+
+        metadata = asdict(record)
+        metadata.pop("article_text", None)
+        metadata["licence_info"] = licence_info
+        metadata_text = json.dumps(metadata, ensure_ascii=False, indent=2)
+        (article_dir / "metadata.json").write_text(metadata_text + "\n", encoding="utf-8")
     @staticmethod
     def _normalize_language(value: str | None) -> str | None:
         if not value:
@@ -932,6 +1060,16 @@ class CzasopismaScraper:
         )
 
 
+def export_article_bundles(scraper: CzasopismaScraper, records: list[ArticleRecord], export_dir: str) -> None:
+    root = Path(export_dir)
+    root.mkdir(parents=True, exist_ok=True)
+
+    for index, record in enumerate(records):
+        scraper.export_article_bundle(record, root, index)
+
+    LOGGER.info("Exported %d article bundle directories to %s", len(records), root)
+
+
 def write_output(records: list[ArticleRecord], output_path: str | None, output_format: str, pretty: bool) -> None:
     if output_format == "json":
         payload = [asdict(record) for record in records]
@@ -1043,6 +1181,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Extract article text from PDF links and include it as article_text.",
     )
+    parser.add_argument(
+        "--skip-english-articles",
+        action="store_true",
+        help="Skip records detected as English-language articles.",
+    )
+    parser.add_argument(
+        "--article-export-dir",
+        default=None,
+        help=(
+            "Create per-article folders in this directory with article.pdf, issue_full_name.txt, "
+            "licence_and_sources.txt, extracted_text.txt, and metadata.json (without extracted text)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1106,8 +1257,18 @@ def main() -> int:
 
     records = [record for record in records_by_index if record is not None]
 
+    if args.skip_english_articles:
+        before_count = len(records)
+        records = [record for record in records if record.article_language != "English"]
+        skipped = before_count - len(records)
+        LOGGER.info("Skipped %d English-language records", skipped)
+
     LOGGER.info("Finished scraping. Successful records: %d", len(records))
     write_output(records, args.output, args.format, args.pretty)
+
+    if args.article_export_dir:
+        export_article_bundles(scraper, records, args.article_export_dir)
+
     return 0
 
 
