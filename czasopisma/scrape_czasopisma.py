@@ -384,6 +384,29 @@ def _render_lines_as_text(lines: list[PdfLine]) -> str:
 
 def _compact_numbered_sections(text: str) -> str:
     heading_re = re.compile(r"^\d+\.\s+\S")
+
+    def is_section_heading(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        if heading_re.match(stripped):
+            return True
+
+        if len(stripped) > 90:
+            return False
+        if re.search(r"://|@", stripped):
+            return False
+        if re.search(r"[\.;!]$", stripped):
+            return False
+        if re.search(r"[,:;]\s", stripped):
+            return False
+
+        words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9]+", stripped)
+        if not words or len(words) > 8:
+            return False
+
+        return bool(stripped[0].isupper() or stripped[0].isdigit())
+
     source_lines = [line.strip() for line in text.splitlines()]
     out: list[str] = []
     idx = 0
@@ -397,7 +420,7 @@ def _compact_numbered_sections(text: str) -> str:
             idx += 1
             continue
 
-        if heading_re.match(line):
+        if is_section_heading(line):
             out.append(line)
             # Keep chapter headings visually separated from paragraph body.
             out.append("")
@@ -409,7 +432,7 @@ def _compact_numbered_sections(text: str) -> str:
                 if not current:
                     idx += 1
                     continue
-                if heading_re.match(current):
+                if is_section_heading(current):
                     break
                 body_parts.append(current)
                 idx += 1
