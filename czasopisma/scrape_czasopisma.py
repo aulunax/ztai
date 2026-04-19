@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import concurrent.futures as cf
 import csv
 import json
@@ -13,6 +14,8 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, asdict
+from io import BytesIO
+from statistics import median
 from typing import Iterable
 from urllib.parse import urljoin, urlparse
 
@@ -34,7 +37,10 @@ class ArticleRecord:
     article_url: str
     journal_name: str | None
     journal_name_with_issue: str | None
+    article_language: str
+    licence_info: str | None
     pdf_download_url: str | None
+    article_text: str | None
 
 
 @dataclass
@@ -43,11 +49,410 @@ class ArticleEntry:
     issue_display_name: str | None
 
 
+@dataclass
+class PdfLine:
+    text: str
+    page_no: int
+    top: float
+    bottom: float
+    x0: float
+    x1: float
+    size: float
+    page_width: float
+    page_height: float
+
+    @property
+    def center_x(self) -> float:
+        return (self.x0 + self.x1) / 2.0
+
+    @property
+    def is_centered(self) -> bool:
+        return abs(self.center_x - self.page_width / 2.0) < self.page_width * 0.16
+
+
+def _extract_pdf_page_lines(page: object, page_no: int) -> list[PdfLine]:
+    words = page.extract_words(
+        use_text_flow=True,
+        keep_blank_chars=False,
+        x_tolerance=2,
+        y_tolerance=3,
+        extra_attrs=["size"],
+    )
+    if not words:
+        return []
+
+    words = sorted(words, key=lambda w: (float(w["top"]), float(w["x0"])))
+    raw_lines: list[dict[str, object]] = []
+    y_tol = 2.8
+
+    for word in words:
+        text = str(word.get("text", "")).strip()
+        if not text:
+            continue
+
+        top = float(word["top"])
+        bottom = float(word["bottom"])
+        x0 = float(word["x0"])
+        x1 = float(word["x1"])
+        size = float(word.get("size", 0) or 0)
+
+        if not raw_lines or abs(top - float(raw_lines[-1]["top"])) > y_tol:
+            raw_lines.append(
+                {
+                    "top": top,
+                    "bottom": bottom,
+                    "x0": x0,
+                    "x1": x1,
+                    "parts": [text],
+                    "sizes": [size],
+                    "tokens": [{"text": text, "size": size, "top": top}],
+                }
+            )
+            continue
+
+        line = raw_lines[-1]
+        line["top"] = min(float(line["top"]), top)
+        line["bottom"] = max(float(line["bottom"]), bottom)
+        line["x0"] = min(float(line["x0"]), x0)
+        line["x1"] = max(float(line["x1"]), x1)
+        line["parts"].append(text)
+        line["sizes"].append(size)
+        line["tokens"].append({"text": text, "size": size, "top": top})
+
+    out: list[PdfLine] = []
+    for line in raw_lines:
+        tokens = list(line.get("tokens", []))
+
+        if tokens:
+            numeric_re = re.compile(r"^\d{1,3}$")
+            non_numeric_sizes = [
+                float(tok["size"])
+                for tok in tokens
+                if not numeric_re.match(str(tok["text"])) and float(tok["size"]) > 0
+            ]
+            all_sizes = [float(tok["size"]) for tok in tokens if float(tok["size"]) > 0]
+            base_size = median(non_numeric_sizes) if non_numeric_sizes else (median(all_sizes) if all_sizes else 0.0)
+
+            non_numeric_tops = [float(tok["top"]) for tok in tokens if not numeric_re.match(str(tok["text"]))]
+            all_tops = [float(tok["top"]) for tok in tokens]
+            base_top = median(non_numeric_tops) if non_numeric_tops else (median(all_tops) if all_tops else 0.0)
+
+            filtered_tokens: list[dict[str, object]] = []
+            for idx, tok in enumerate(tokens):
+                token_text = str(tok["text"]).strip()
+                token_size = float(tok["size"])
+                token_top = float(tok["top"])
+
+                if numeric_re.match(token_text):
+                    tiny = token_size <= base_size - 1.4
+                    raised = token_top <= base_top - 0.6
+                    edge = idx == 0 or idx == len(tokens) - 1
+                    if tiny and (raised or edge):
+                        continue
+
+                filtered_tokens.append(tok)
+
+            tokens = filtered_tokens
+
+        text = re.sub(r"\s+", " ", " ".join(str(tok["text"]) for tok in tokens).strip())
+        if not text:
+            continue
+        sizes = [v for v in line["sizes"] if v > 0]
+        out.append(
+            PdfLine(
+                text=text,
+                page_no=page_no,
+                top=float(line["top"]),
+                bottom=float(line["bottom"]),
+                x0=float(line["x0"]),
+                x1=float(line["x1"]),
+                size=float(median(sizes) if sizes else 0.0),
+                page_width=float(page.width),
+                page_height=float(page.height),
+            )
+        )
+    return out
+
+
+def _is_running_header_or_footer(line: PdfLine, body_size: float) -> bool:
+    near_top = line.top < line.page_height * 0.12
+    near_bottom = line.top > line.page_height * 0.90
+    small = line.size <= body_size - 1.8
+    header_signature = bool(re.search(r"\[\d+\]", line.text) or re.search(r"\b\d+\b", line.text[:24]))
+
+    if near_bottom and small:
+        return True
+    if near_top and (small or header_signature):
+        return True
+    return False
+
+
+def _is_bottom_annotation(line: PdfLine, body_size: float) -> bool:
+    if line.top < line.page_height * 0.45:
+        return False
+    if line.size > body_size - 0.9:
+        return False
+    if re.match(r"^\d+\s+", line.text):
+        return True
+    if re.search(r"\b(?:Dz\.\s*U\.|OSNC|Legalis|Lex|Glosa|Monitor|Przeglad)\b", line.text):
+        return True
+    return True
+
+
+def _drop_first_page_front_matter(lines: list[PdfLine], body_size: float) -> list[PdfLine]:
+    if not lines:
+        return lines
+
+    title_start = None
+    for i, line in enumerate(lines):
+        if not (line.size >= body_size + 0.8 and line.is_centered and len(line.text) >= 18):
+            continue
+
+        alpha = sum(1 for char in line.text if char.isalpha())
+        upper = sum(1 for char in line.text if char.isupper())
+        uppercase_ratio = upper / max(1, alpha)
+        if uppercase_ratio > 0.72:
+            title_start = i
+            break
+
+    if title_start is None:
+        return lines
+    return lines[title_start:]
+
+
+def _find_cutoff_after_last_numbered_section(lines: list[PdfLine], body_size: float) -> int:
+    numbered: list[tuple[int, int]] = []
+    for idx, line in enumerate(lines):
+        match = re.match(r"^(\d+)\.\s+\S", line.text)
+        if not match:
+            continue
+        if abs(line.size - body_size) <= 0.4 or line.size >= body_size:
+            numbered.append((idx, int(match.group(1))))
+
+    if not numbered:
+        return len(lines)
+
+    max_num = max(num for _, num in numbered)
+    last_idx = max(idx for idx, num in numbered if num == max_num)
+
+    chars_after_last_heading = 0
+    for idx in range(last_idx + 1, len(lines)):
+        line = lines[idx]
+        chars_after_last_heading += len(line.text)
+
+        if idx - last_idx < 8 or chars_after_last_heading < 900:
+            continue
+        if re.match(r"^\d+\.\s+\S", line.text):
+            continue
+        if line.size < body_size - 0.1:
+            continue
+
+        prev = lines[idx - 1]
+        gap = line.top - prev.bottom
+        heading_like = line.is_centered or gap >= body_size * 1.6
+        if not heading_like:
+            continue
+
+        nxt = lines[idx + 1] if idx + 1 < len(lines) else None
+        if nxt and nxt.size >= body_size - 0.3 and (nxt.is_centered or (nxt.top - line.bottom) < body_size * 1.2):
+            return idx
+        if nxt and nxt.size <= body_size - 1.0:
+            return idx
+        if gap >= body_size * 1.9:
+            return idx
+
+    return len(lines)
+
+
+def _normalize_hyphenation_and_spacing(text: str) -> str:
+    text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    text = re.sub(r"\s+([,\.;:!?\)])", r"\1", text)
+    text = re.sub(r"([\(\[])\s+", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _render_lines_as_text(lines: list[PdfLine]) -> str:
+    out: list[str] = []
+    last_page = None
+    last_bottom = None
+    for line in lines:
+        if last_page is not None and line.page_no != last_page:
+            out.append("\n")
+            last_bottom = None
+
+        if last_bottom is not None and (line.top - last_bottom) > line.size * 1.35:
+            out.append("\n")
+
+        out.append(line.text + "\n")
+        last_page = line.page_no
+        last_bottom = line.bottom
+
+    return _normalize_hyphenation_and_spacing("".join(out))
+
+
+def _compact_numbered_sections(text: str) -> str:
+    heading_re = re.compile(r"^\d+\.\s+\S")
+    source_lines = [line.strip() for line in text.splitlines()]
+    out: list[str] = []
+    idx = 0
+
+    while idx < len(source_lines):
+        line = source_lines[idx]
+
+        if not line:
+            if out and out[-1] != "":
+                out.append("")
+            idx += 1
+            continue
+
+        if heading_re.match(line):
+            out.append(line)
+            # Keep chapter headings visually separated from paragraph body.
+            out.append("")
+            idx += 1
+
+            body_parts: list[str] = []
+            while idx < len(source_lines):
+                current = source_lines[idx]
+                if not current:
+                    idx += 1
+                    continue
+                if heading_re.match(current):
+                    break
+                body_parts.append(current)
+                idx += 1
+
+            body = re.sub(r"\s+", " ", " ".join(body_parts)).strip()
+            if body:
+                out.append(body)
+
+            if out and out[-1] != "":
+                out.append("")
+            continue
+
+        out.append(line)
+        idx += 1
+
+    normalized: list[str] = []
+    for line in out:
+        if line == "" and (not normalized or normalized[-1] == ""):
+            continue
+        normalized.append(line)
+
+    while normalized and normalized[-1] == "":
+        normalized.pop()
+
+    return "\n".join(normalized)
+
+
+def _extract_licence_info_from_text(text: str) -> str | None:
+    if not text:
+        return None
+
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+
+        if "creative commons" in line.lower() or re.search(r"\bcc\s*by", line, flags=re.IGNORECASE):
+            match = re.search(
+                r"(Creative\s+Commons\s+CC\s*BY(?:-[A-Z]{2})?(?:\s+[0-9]+(?:\.[0-9]+)?)?(?:\s+[^\s,;:\.]{1,30}){0,4})",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return re.sub(r"\s+", " ", match.group(1)).strip(" .;,")
+
+            match = re.search(
+                r"(CC\s*BY(?:-[A-Z]{2})?(?:\s+[0-9]+(?:\.[0-9]+)?)?(?:\s+[^\s,;:\.]{1,30}){0,4})",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return re.sub(r"\s+", " ", match.group(1)).strip(" .;,")
+
+        if "prawa autorskie" in line.lower():
+            return line.strip(" .;,")
+
+    return None
+
+
+def extract_article_content_from_pdf_bytes(pdf_bytes: bytes) -> tuple[str, str | None]:
+    import pdfplumber
+
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        pages = [_extract_pdf_page_lines(page, i + 1) for i, page in enumerate(pdf.pages)]
+
+    all_lines = [line for page in pages for line in page]
+    if not all_lines:
+        return "", None
+
+    full_pdf_text = "\n".join(line.text for line in all_lines if line.text)
+    licence_info = _extract_licence_info_from_text(full_pdf_text)
+
+    heading_sizes = [
+        line.size
+        for line in all_lines
+        if re.match(r"^\d+\.\s+\S", line.text)
+        and 9.0 <= line.size <= 14.0
+    ]
+    if heading_sizes:
+        body_size = float(median(heading_sizes))
+    else:
+        bucket = Counter(round(line.size * 2) / 2 for line in all_lines if 8.5 <= line.size <= 13.0)
+        body_size = float(max(bucket.items(), key=lambda kv: (kv[1], kv[0]))[0]) if bucket else 11.0
+
+    cleaned_pages: list[list[PdfLine]] = []
+    for i, page_lines in enumerate(pages):
+        lines = [line for line in page_lines if not _is_running_header_or_footer(line, body_size)]
+        if i == 0:
+            lines = _drop_first_page_front_matter(lines, body_size)
+        lines = [line for line in lines if not _is_bottom_annotation(line, body_size)]
+        cleaned_pages.append(lines)
+
+    cleaned_lines = [line for page in cleaned_pages for line in page]
+    cutoff = _find_cutoff_after_last_numbered_section(cleaned_lines, body_size)
+    cleaned_lines = cleaned_lines[:cutoff]
+
+    while cleaned_lines:
+        last = cleaned_lines[-1]
+        if re.match(r"^\d+\.\s+\S", last.text):
+            break
+
+        looks_heading = (
+            last.size >= body_size - 0.2
+            and len(last.text) <= 140
+            and not re.search(r"[\.!?;:]$", last.text)
+            and (last.is_centered or last.text[:1].isupper())
+        )
+        if not looks_heading:
+            break
+        cleaned_lines.pop()
+
+    article_text = _compact_numbered_sections(_render_lines_as_text(cleaned_lines))
+    return article_text, licence_info
+
+
+def extract_article_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
+    article_text, _licence_info = extract_article_content_from_pdf_bytes(pdf_bytes)
+    return article_text
+
+
 class CzasopismaScraper:
-    def __init__(self, delay: float = 0.0, timeout: int = 20, verbose: bool = False) -> None:
+    def __init__(
+        self,
+        delay: float = 0.0,
+        timeout: int = 20,
+        verbose: bool = False,
+        extract_pdf_content: bool = False,
+    ) -> None:
         self.delay = max(delay, 0.0)
         self.timeout = timeout
         self.verbose = verbose
+        self.extract_pdf_content = extract_pdf_content
         self._thread_local = threading.local()
 
     def _build_session(self) -> requests.Session:
@@ -84,6 +489,23 @@ class CzasopismaScraper:
         if self.delay > 0:
             time.sleep(self.delay)
         return BeautifulSoup(response.text, "html.parser")
+
+    def _fetch_pdf_bytes(self, url: str) -> bytes:
+        self._log(f"GET {url}")
+        response = self._get_session().get(url, timeout=self.timeout)
+        response.raise_for_status()
+        if self.delay > 0:
+            time.sleep(self.delay)
+        return response.content
+
+    def _extract_article_content_from_pdf_url(self, pdf_url: str) -> tuple[str | None, str | None]:
+        try:
+            pdf_bytes = self._fetch_pdf_bytes(pdf_url)
+            text, licence_info = extract_article_content_from_pdf_bytes(pdf_bytes)
+            return text or None, licence_info
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to extract article text from PDF %s: %s", pdf_url, exc)
+            return None, None
 
     @staticmethod
     def _dedupe_keep_order(items: Iterable[str]) -> list[str]:
@@ -180,6 +602,26 @@ class CzasopismaScraper:
         return deduped
 
     def _extract_issue_display_name(self, issue_soup: BeautifulSoup) -> str | None:
+        # Prefer explicit issue labels shown on issue pages/cards (e.g. "Tom 26 Nr 1").
+        for selector in (
+            ".archives__item .desc h2",
+            ".archives__item h2",
+            ".archives__item--second h2",
+            "main h2",
+        ):
+            tag = issue_soup.select_one(selector)
+            if tag:
+                text = tag.get_text(" ", strip=True)
+                if text:
+                    return text
+
+        # Fallback: find a likely issue label anywhere in page text.
+        page_text = issue_soup.get_text(" ", strip=True)
+        match = re.search(r"\bTom\s+\d+\s+Nr\s+\d+(?:\s*\([^\)]*\))?\b", page_text, flags=re.IGNORECASE)
+        if match:
+            return re.sub(r"\s+", " ", match.group(0)).strip()
+
+        # Last resort: legacy header/title extraction.
         for selector in ("h1.page_title", "h1.page-header", "h1"):
             tag = issue_soup.select_one(selector)
             if tag:
@@ -230,6 +672,102 @@ class CzasopismaScraper:
                 value = tag["content"].strip()
                 if value:
                     return value
+        return None
+
+    def _extract_licence_info(self, soup: BeautifulSoup) -> str | None:
+        rights = self._meta_content(
+            soup,
+            "DC.Rights",
+            "dc.rights",
+            "citation_rights",
+        )
+        return rights or None
+
+    @staticmethod
+    def _normalize_language(value: str | None) -> str | None:
+        if not value:
+            return None
+
+        token = value.strip().lower().replace("-", "_")
+        token = token.split(";")[0].split(",")[0].strip()
+
+        lang_map = {
+            "pl": "Polish",
+            "pl_pl": "Polish",
+            "pol": "Polish",
+            "en": "English",
+            "en_us": "English",
+            "eng": "English",
+        }
+        if token in lang_map:
+            return lang_map[token]
+
+        # Keep human-readable values if the source already provides one.
+        if token in {"polish", "english"}:
+            return token.capitalize()
+
+        return None
+
+    def _extract_article_language(self, soup: BeautifulSoup) -> str:
+        raw = self._meta_content(
+            soup,
+            "citation_language",
+            "DC.Language",
+            "dc.language",
+        )
+        normalized = self._normalize_language(raw)
+
+        title = self._meta_content(soup, "citation_title")
+        if not title:
+            heading = soup.select_one("h1.page_title, h1")
+            if heading:
+                title = heading.get_text(" ", strip=True)
+
+        inferred = self._infer_language_from_title(title)
+        if inferred and (normalized is None or normalized == "Polish"):
+            return inferred
+
+        return normalized or "Polish"
+
+    @staticmethod
+    def _infer_language_from_title(title: str | None) -> str | None:
+        if not title:
+            return None
+
+        lowered = title.lower()
+        if re.search(r"[ąćęłńóśźż]", lowered):
+            return None
+
+        words = re.findall(r"[a-zA-Z']+", lowered)
+        if len(words) < 4:
+            return None
+
+        english_markers = {
+            "the",
+            "and",
+            "of",
+            "in",
+            "on",
+            "to",
+            "for",
+            "with",
+            "from",
+            "civil",
+            "proceedings",
+            "service",
+            "selected",
+            "issues",
+            "status",
+            "law",
+            "code",
+            "concept",
+            "summary",
+            "polish",
+        }
+        marker_hits = sum(1 for word in words if word in english_markers)
+        if marker_hits >= 2 and marker_hits / len(words) >= 0.2:
+            return "English"
+
         return None
 
     def _extract_journal_name(self, soup: BeautifulSoup) -> str | None:
@@ -286,13 +824,23 @@ class CzasopismaScraper:
 
         journal_name = self._extract_journal_name(soup)
         journal_name_with_issue = self._compose_journal_name_with_issue(journal_name, issue_display_name)
+        article_language = self._extract_article_language(soup)
+        licence_info = self._extract_licence_info(soup)
         pdf_link = self._extract_pdf_link(soup, article_url)
+        article_text = None
+        if self.extract_pdf_content and pdf_link:
+            article_text, pdf_licence_info = self._extract_article_content_from_pdf_url(pdf_link)
+            if pdf_licence_info:
+                licence_info = pdf_licence_info
 
         return ArticleRecord(
             article_url=article_url,
             journal_name=journal_name,
             journal_name_with_issue=journal_name_with_issue,
+            article_language=article_language,
+            licence_info=licence_info,
             pdf_download_url=pdf_link,
+            article_text=article_text,
         )
 
 
@@ -310,7 +858,15 @@ def write_output(records: list[ArticleRecord], output_path: str | None, output_f
         return
 
     # CSV
-    fieldnames = ["article_url", "journal_name", "journal_name_with_issue", "pdf_download_url"]
+    fieldnames = [
+        "article_url",
+        "journal_name",
+        "journal_name_with_issue",
+        "article_language",
+        "licence_info",
+        "pdf_download_url",
+        "article_text",
+    ]
     if output_path:
         with open(output_path, "w", encoding="utf-8", newline="") as file_obj:
             writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
@@ -329,7 +885,7 @@ def write_output(records: list[ArticleRecord], output_path: str | None, output_f
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Scrape Czasopisma/OJS pages and return article URL, journal name, and original PDF link."
+            "Scrape Czasopisma/OJS pages and return article URL, journal name, PDF link, and optional extracted article text."
         )
     )
     parser.add_argument(
@@ -394,6 +950,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show progress logs on stderr.",
     )
+    parser.add_argument(
+        "--extract-pdf-content",
+        action="store_true",
+        help="Extract article text from PDF links and include it as article_text.",
+    )
     return parser.parse_args()
 
 
@@ -406,7 +967,12 @@ def main() -> int:
     )
     LOGGER.info("Starting scraper")
 
-    scraper = CzasopismaScraper(delay=args.delay, timeout=args.timeout, verbose=args.verbose)
+    scraper = CzasopismaScraper(
+        delay=args.delay,
+        timeout=args.timeout,
+        verbose=args.verbose,
+        extract_pdf_content=args.extract_pdf_content,
+    )
 
     issue_urls = args.issue_url if args.issue_url else scraper.extract_issue_links(args.archive_url)
     if args.max_issues is not None:
