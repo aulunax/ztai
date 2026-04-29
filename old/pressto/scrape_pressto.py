@@ -67,7 +67,7 @@ class PresstoScraper:
         return session
 
     def _fetch_soup(self, url: str) -> BeautifulSoup:
-        LOGGER.debug("GET %s", url)
+        LOGGER.info("GET %s", url)
         response = self._get_session().get(url, timeout=self.timeout)
         response.raise_for_status()
         if self.delay > 0:
@@ -303,6 +303,7 @@ class PresstoScraper:
         return journal_name
 
     def extract_article_record(self, article_url: str, issue_display_name: str | None = None) -> ArticleRecord:
+        LOGGER.info("Extracting article record: %s", article_url)
         soup = self._fetch_soup(article_url)
 
         journal_name = self._extract_journal_name(soup)
@@ -466,7 +467,7 @@ def main() -> int:
             try:
                 records_by_index[index] = future.result()
             except Exception as exc:  # noqa: BLE001
-                print(f"Warning: failed to scrape article {entry.article_url}: {exc}", file=sys.stderr)
+                LOGGER.warning("Failed to scrape article %s: %s", entry.article_url, exc)
 
     records = [record for record in records_by_index if record is not None]
 
