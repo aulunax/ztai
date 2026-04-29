@@ -28,9 +28,9 @@ class Crawler(ABC):
         session.mount("http://", adapter)
         return session
     
-    def _get_html_from_url(self, url: str, session):
+    def _get_html_from_url(self, url: str):
         try:
-            response = session.get(url, timeout=10)
+            response = self.session.get(url, timeout=10)
             response.raise_for_status()
             return response.text
         except requests.RequestException as e:
@@ -38,6 +38,6 @@ class Crawler(ABC):
             return None
     
     @abstractmethod
-    def crawl(self, workers: int = 1):
+    def crawl(self, workers: int = 1, limit: int = None):
         pass
 
