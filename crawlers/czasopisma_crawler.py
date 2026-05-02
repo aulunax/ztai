@@ -120,8 +120,17 @@ class CzasopismaCrawler(Crawler):
                 try:
                     pdf_link = future.result()
                     if pdf_link:
-                        article.url = pdf_link
+                        article.pdf_url = pdf_link
                 except Exception as e:
                     self.logger.error(f"Article {article.url} generated an exception: {e}")
+
+        total_with_pdf = len([article for article in filtered_articles if article.pdf_url])
+        total_with_license = len([article for article in filtered_articles if article.license and article.license != "Unknown"])
+        total_with_pdf_and_license = len([article for article in filtered_articles if article.pdf_url and article.license and article.license != "Unknown"])
+
+        self.logger.info(f"Total valid articles: {len(filtered_articles)}")
+        self.logger.info(f"Total articles with PDF links: {total_with_pdf}")
+        self.logger.info(f"Total articles with license info: {total_with_license}")
+        self.logger.info(f"Total articles with both PDF links and license info: {total_with_pdf_and_license}")
 
         return filtered_articles

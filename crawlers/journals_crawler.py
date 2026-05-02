@@ -72,7 +72,7 @@ class JournalsCrawler(Crawler):
         pdf_link = soup.find("a", class_="file", href=True, text="PDF (Język Polski)")["href"]
         pdf_link = pdf_link.replace("/view/", "/download/")
         license_info = soup.find_all("a", rel="license")
-        license = license_info[1].text.strip() if len(license_info) > 1 else "Unknown"
+        license = license_info[1].text.strip() if len(license_info) > 1 else None
         if len(license_info) == 1:
             self.logger.warning(f"Only one license link found for article {article_url}. License info may be incomplete.")
 
@@ -119,9 +119,18 @@ class JournalsCrawler(Crawler):
                 article = future_to_article[future]
                 try:
                     pdf_link, license_info = future.result()
-                    article.url = pdf_link if pdf_link else article.url
+                    article.pdf_url = pdf_link if pdf_link else article.url
                     article.license = license_info if license_info else "Unknown"
                 except Exception as e:
                     self.logger.error(f"Article {article.url} generated an exception: {e}")
+
+        total_with_pdf = len([article for article in filtered_articles if article.pdf_url])
+        total_with_license = len([article for article in filtered_articles if article.license and article.license != "Unknown"])
+        total_with_pdf_and_license = len([article for article in filtered_articles if article.pdf_url and article.license and article.license != "Unknown"])
+
+        self.logger.info(f"Total valid articles: {len(filtered_articles)}")
+        self.logger.info(f"Total articles with PDF links: {total_with_pdf}")
+        self.logger.info(f"Total articles with license info: {total_with_license}")
+        self.logger.info(f"Total articles with both PDF links and license info: {total_with_pdf_and_license}")
 
         return filtered_articles
