@@ -11,8 +11,6 @@ import time
 from bs4 import BeautifulSoup
 import pdfplumber
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from utils.issue import ArticleData
 
@@ -519,36 +517,11 @@ def _extract_article_content_from_pdf_path(pdf_path: Path) -> tuple[str, str | N
     return article_text, licence_info
 
 
-def _format_eta(seconds: float) -> str:
-    total_seconds = max(0, int(round(seconds)))
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    secs = total_seconds % 60
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
 class CzasopismaExtractor(Extractor):
-    def __init__(self, output_dir: str | None = None, skip_preparation: bool = False):
+    def __init__(self, output_dir: str | None = None, skip_download: bool = False):
         super().__init__()
         self.output_dir = Path(output_dir) if output_dir else Path(".")
-        self.skip_preparation = skip_preparation
-        self.session = self._build_session()
-
-    def _build_session(self) -> requests.Session:
-        session = requests.Session()
-        retries = Retry(
-            total=4,
-            connect=4,
-            read=4,
-            backoff_factor=0.5,
-            status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=("GET", "HEAD"),
-            raise_on_status=False,
-        )
-        adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        return session
+        self.skip_download = skip_download
 
     def _fetch_soup(self, url: str) -> BeautifulSoup | None:
         try:
@@ -559,15 +532,6 @@ class CzasopismaExtractor(Extractor):
             self.logger.warning("Failed to fetch page %s: %s", url, exc)
             return None
 
-    def _download_pdf(self, pdf_url: str, pdf_path: Path) -> bool:
-        try:
-            response = self.session.get(pdf_url, timeout=30)
-            response.raise_for_status()
-            pdf_path.write_bytes(response.content)
-            return True
-        except requests.RequestException as exc:
-            self.logger.warning("Failed to download PDF %s: %s", pdf_url, exc)
-            return False
 
     @staticmethod
     def _meta_content(soup: BeautifulSoup, *names: str) -> str | None:
@@ -618,7 +582,7 @@ class CzasopismaExtractor(Extractor):
         export_root.mkdir(parents=True, exist_ok=True)
 
         total_articles = len(articles)
-        if not self.skip_preparation:
+        if not self.skip_download:
             self.logger.info("Phase 1: downloading PDFs")
             for index, article in enumerate(articles):
                 self.logger.info("Downloading PDF %d/%d", index + 1, total_articles)
@@ -640,7 +604,7 @@ class CzasopismaExtractor(Extractor):
             if extraction_times:
                 avg_text = sum(extraction_times) / len(extraction_times)
                 remaining = total_articles - (index + 1)
-                eta = _format_eta(avg_text * remaining)
+                eta = self._format_eta(avg_text * remaining)
                 self.logger.info("Extracting article %d/%d (ETA: %s)", index + 1, total_articles, eta)
             else:
                 self.logger.info("Extracting article %d/%d", index + 1, total_articles)
@@ -650,10 +614,6 @@ class CzasopismaExtractor(Extractor):
 
             article_dir = self._build_article_dir(article, index, export_root)
             pdf_path = article_dir / "article.pdf"
-
-            if self.skip_preparation and not article_dir.exists():
-                self.logger.warning("Missing article directory %s, skipping.", article_dir)
-                continue
 
             if not pdf_path.exists():
                 self.logger.warning("PDF not found for %s", article_dir)
@@ -669,14 +629,13 @@ class CzasopismaExtractor(Extractor):
 
             if pdf_licence:
                 article.license = pdf_licence
-            elif not article.license and not self.skip_preparation and article.url:
+            elif not article.license and article.url:
                 page_licence = self._extract_page_licence_info(article.url)
                 if page_licence:
                     article.license = page_licence
 
             (article_dir / "extracted_text.txt").write_text(extracted_text.strip() + "\n", encoding="utf-8")
 
-            if not self.skip_preparation:
-                metadata_path = article_dir / "metadata.json"
-                metadata_text = json.dumps(article.to_json(), ensure_ascii=False, indent=2)
-                metadata_path.write_text(metadata_text + "\n", encoding="utf-8")
+            metadata_path = article_dir / "metadata.json"
+            metadata_text = json.dumps(article.to_json(), ensure_ascii=False, indent=2)
+            metadata_path.write_text(metadata_text + "\n", encoding="utf-8")

@@ -18,7 +18,7 @@ def process_site(
     workers: int,
     output_dir: str = None,
     sejm_issues_file: str = None,
-    skip_czasopisma_prep: bool = False,
+    skip_download: bool = False,
     skip_crawl_load: bool = False,
 ):
     site_start = time.perf_counter()
@@ -82,7 +82,7 @@ def process_site(
         ExtractorFactory.create_extractor(
             site,
             output_dir=output_dir,
-            skip_czasopisma_prep=skip_czasopisma_prep,
+            skip_download=skip_download,
         ).extract(data, extract_limit)
         extract_duration = time.perf_counter() - extract_start
         logger.info("Finished extraction for %s in %.2fs.", site, extract_duration)
@@ -100,9 +100,9 @@ def parse_args() -> argparse.Namespace:
         help="Path to JSON file with Sejm issue URLs. If provided and exists, step 1 is skipped.",
     )
     parser.add_argument(
-        "--skip-czasopisma-prep",
+        "--skip-download",
         action="store_true",
-        help="Skip Czasopisma preparation (metadata + PDF download) and use existing files.",
+        help="Skip PDF download phase for all extractors.",
     )
     parser.add_argument("--skip-extraction", action="store_true", help="Skip extraction phase")
     parser.add_argument(
@@ -137,6 +137,8 @@ if __name__ == "__main__":
         logger.info("Crawling phase will be skipped (loading cached data).")
     elif args.issue_limit:
         logger.info("Limit for issues to process: %d", args.issue_limit)
+    if args.skip_download:
+        logger.info("Download phase will be skipped.")
     if args.extract_limit:
         logger.info("Limit for articles to process: %d", args.extract_limit)
     logger.info("Output directory: %s", args.output_dir if args.output_dir else "stdout")
@@ -157,7 +159,7 @@ if __name__ == "__main__":
             args.workers,
             args.output_dir,
             sejm_issues_file if site == "sejm" else None,
-            args.skip_czasopisma_prep if site == "czasopisma" else False,
+            args.skip_download,
             args.skip_crawl_load,
         )
 
