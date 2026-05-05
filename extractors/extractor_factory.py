@@ -5,13 +5,13 @@ from .journals_extractor import JournalsExtractor
 
 class ExtractorFactory:
     @staticmethod
-    def create_extractor(extractor_type):
+    def create_extractor(extractor_type, output_dir=None, skip_czasopisma_prep=False):
         if extractor_type == "pressto":
             return PresstoExtractor()
         elif extractor_type == "sejm":
             return SejmExtractor()
         elif extractor_type == "czasopisma":
-            return CzasopismaExtractor()
+            return CzasopismaExtractor(output_dir=output_dir, skip_preparation=skip_czasopisma_prep)
         elif extractor_type == "journals":
             return JournalsExtractor()
         else:
