@@ -48,14 +48,6 @@ class PresstoCrawler(Crawler):
 
         self.logger.info(f"Extracted {len(articles)} articles from issue {issue_name}")
         return articles
-
-
-    def _fetch_issue(self, issue_url):
-        self.logger.info(f"Fetching issue page {issue_url} for Czasopisma...")
-        html = self._get_html_from_url(issue_url)
-        if html:
-            return self._get_articles_from_issue_page(html)
-        return []
     
 
     def _get_pdf_and_license(self, article_url):

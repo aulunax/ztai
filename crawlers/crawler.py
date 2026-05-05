@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import logging
+from time import sleep
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -36,6 +37,25 @@ class Crawler(ABC):
         except requests.RequestException as e:
             self.logger.error(f"Error fetching from {self.base_url}: {e}")
             return None
+        
+    def _fetch_issue(self, issue_url, sejm=False):
+        self.logger.info(f"Fetching issue page {issue_url}...")
+
+        if sejm:
+            # WE love sejm
+            self._get_html_from_url(issue_url)
+            sleep(0.5)
+            html = self._get_html_from_url(issue_url)
+        else:
+            html = self._get_html_from_url(issue_url)
+
+        if html:
+            return self._get_articles_from_issue_page(html)
+        return []
+
+    @abstractmethod
+    def _get_articles_from_issue_page(self, html: str):
+        pass
     
     @abstractmethod
     def crawl(self, workers: int = 1, limit: int = None):

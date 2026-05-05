@@ -5,9 +5,9 @@ from .pressto_crawler import PresstoCrawler
 
 class CrawlerFactory:
     @staticmethod
-    def create_crawler(crawler_type):
+    def create_crawler(crawler_type, sejm_issues_file=None):
         if crawler_type == "sejm":
-            return SejmCrawler()
+            return SejmCrawler(issues_cache_path=sejm_issues_file)
         elif crawler_type == "journals":
             return JournalsCrawler()
         elif crawler_type == "czasopisma":
