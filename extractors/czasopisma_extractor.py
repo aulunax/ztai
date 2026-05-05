@@ -618,8 +618,6 @@ class CzasopismaExtractor(Extractor):
         export_root.mkdir(parents=True, exist_ok=True)
 
         total_articles = len(articles)
-        extracted_text_by_idx: dict[int, str] = {}
-        pdf_licence_by_idx: dict[int, str] = {}
         if not self.skip_preparation:
             self.logger.info("Phase 1: downloading PDFs")
             for index, article in enumerate(articles):
@@ -636,61 +634,11 @@ class CzasopismaExtractor(Extractor):
                 else:
                     self.logger.warning("Missing PDF URL for %s", article.url or f"index {index}")
 
-        if not self.skip_preparation:
-            self.logger.info("Phase 2: extracting license and writing metadata")
-            license_times: list[float] = []
-            for index, article in enumerate(articles):
-                if license_times:
-                    avg_license = sum(license_times) / len(license_times)
-                    remaining = total_articles - (index + 1)
-                    eta = _format_eta(avg_license * remaining)
-                    self.logger.info("Processing metadata %d/%d (ETA: %s)", index + 1, total_articles, eta)
-                else:
-                    self.logger.info("Processing metadata %d/%d", index + 1, total_articles)
-                if not isinstance(article, ArticleData):
-                    self.logger.warning("Skipping non-ArticleData entry at index %d", index)
-                    continue
-
-                article_dir = self._build_article_dir(article, index, export_root)
-                pdf_path = article_dir / "article.pdf"
-
-                if self.skip_preparation and not article_dir.exists():
-                    self.logger.warning("Missing article directory %s, skipping.", article_dir)
-                    continue
-
-                if not pdf_path.exists():
-                    self.logger.warning("PDF not found for %s", article_dir)
-                    continue
-
-                phase_start = time.perf_counter()
-                try:
-                    _extracted_text, pdf_licence = _extract_article_content_from_pdf_path(pdf_path)
-                except Exception as exc:
-                    self.logger.warning("Failed to extract PDF text for %s: %s", article_dir, exc)
-                    continue
-                license_times.append(time.perf_counter() - phase_start)
-
-                if pdf_licence:
-                    pdf_licence_by_idx[index] = pdf_licence
-
-                pdf_licence = pdf_licence_by_idx.get(index)
-                if pdf_licence:
-                    article.license = pdf_licence
-                elif not article.license and not self.skip_preparation and article.url:
-                    page_licence = self._extract_page_licence_info(article.url)
-                    if page_licence:
-                        article.license = page_licence
-
-                if not self.skip_preparation:
-                    metadata_path = article_dir / "metadata.json"
-                    metadata_text = json.dumps(article.to_json(), ensure_ascii=False, indent=2)
-                    metadata_path.write_text(metadata_text + "\n", encoding="utf-8")
-
-        self.logger.info("Phase 3: extracting text")
-        text_times: list[float] = []
+        self.logger.info("Phase 2: extracting text and license")
+        extraction_times: list[float] = []
         for index, article in enumerate(articles):
-            if text_times:
-                avg_text = sum(text_times) / len(text_times)
+            if extraction_times:
+                avg_text = sum(extraction_times) / len(extraction_times)
                 remaining = total_articles - (index + 1)
                 eta = _format_eta(avg_text * remaining)
                 self.logger.info("Extracting article %d/%d (ETA: %s)", index + 1, total_articles, eta)
@@ -713,11 +661,22 @@ class CzasopismaExtractor(Extractor):
 
             phase_start = time.perf_counter()
             try:
-                extracted_text, _pdf_licence = _extract_article_content_from_pdf_path(pdf_path)
+                extracted_text, pdf_licence = _extract_article_content_from_pdf_path(pdf_path)
             except Exception as exc:
                 self.logger.warning("Failed to extract PDF text for %s: %s", article_dir, exc)
                 continue
-            text_times.append(time.perf_counter() - phase_start)
+            extraction_times.append(time.perf_counter() - phase_start)
 
-            extracted_text_by_idx[index] = extracted_text
+            if pdf_licence:
+                article.license = pdf_licence
+            elif not article.license and not self.skip_preparation and article.url:
+                page_licence = self._extract_page_licence_info(article.url)
+                if page_licence:
+                    article.license = page_licence
+
             (article_dir / "extracted_text.txt").write_text(extracted_text.strip() + "\n", encoding="utf-8")
+
+            if not self.skip_preparation:
+                metadata_path = article_dir / "metadata.json"
+                metadata_text = json.dumps(article.to_json(), ensure_ascii=False, indent=2)
+                metadata_path.write_text(metadata_text + "\n", encoding="utf-8")
