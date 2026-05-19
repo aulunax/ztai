@@ -335,6 +335,18 @@ def _normalize_hyphenation_and_spacing(text: str) -> str:
     return text.strip()
 
 
+def _normalize_midword_caps(text: str) -> str:
+    word_re = re.compile(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{2,}")
+
+    def repl(match: re.Match[str]) -> str:
+        word = match.group(0)
+        if word.isupper():
+            return word
+        return word[0] + word[1:].lower()
+
+    return word_re.sub(repl, text)
+
+
 def _render_lines_as_text(lines: list[PdfLine]) -> str:
     out: list[str] = []
     last_page = None
@@ -513,7 +525,7 @@ def _extract_article_content_from_pdf_path(pdf_path: Path) -> tuple[str, str | N
             break
         cleaned_lines.pop()
 
-    article_text = _compact_numbered_sections(_render_lines_as_text(cleaned_lines))
+    article_text = _normalize_midword_caps(_compact_numbered_sections(_render_lines_as_text(cleaned_lines)))
     return article_text, licence_info
 
 

@@ -192,16 +192,12 @@ class SejmCrawler(Crawler):
     
     def _get_articles_from_issue_page(self, html: str):
         soup = BeautifulSoup(html, "html.parser")
-        self.logger.info("a")
         issue_name = soup.find("h2").text.strip()
-        self.logger.info("b")
         article_rows= soup.find_all("tr")
-        self.logger.info("c")
 
         articles = []
         for article_row in article_rows:
             article_row_cols = article_row.find_all("td")
-            self.logger.info("d")
             if len(article_row_cols) < 4:
                 self.logger.warning(f"Skipping malformed article row in issue {issue_name}: not enough columns")
                 continue
@@ -210,7 +206,7 @@ class SejmCrawler(Crawler):
             pdf_link = article_row_cols[3].find("a", href=True)
             language = "Polish"
                 
-        articles.append(ArticleData(title=article_title, url=article_url, pdf_url=pdf_link["href"] if pdf_link else None, issue=issue_name, journal=self.journal_name, language=language, license=LICENSE_SEJM))
+            articles.append(ArticleData(title=article_title, url=article_url, pdf_url=pdf_link["href"] if pdf_link else None, issue=issue_name, journal=self.journal_name, language=language, license=LICENSE_SEJM))
 
         self.logger.info(f"Extracted {len(articles)} articles from issue {issue_name}")
         return articles
@@ -236,14 +232,11 @@ class SejmCrawler(Crawler):
         all_articles = []
 
         for issue_url in issues_pages:
-            if issue_url.endswith(".pdf"):
-                all_articles.append(ArticleData(pdf_url=issue_url, license=LICENSE_SEJM))
-            else:
+            if not issue_url.endswith(".pdf"):
                 issue_urls_not_pdf.append(issue_url)
 
-
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_url = {executor.submit(self._fetch_issue, url): url for url in issue_urls_not_pdf}
+            future_to_url = {executor.submit(self._fetch_issue, url, True): url for url in issue_urls_not_pdf}
 
             for future in as_completed(future_to_url):
                 url = future_to_url[future]
@@ -253,7 +246,10 @@ class SejmCrawler(Crawler):
                 except Exception as e:
                     self.logger.error(f"Issue {url} generated an exception: {e}")
 
-        self.logger.info(f"Total articles: {len(all_articles)}")
-        self.logger.info(f"Total articles with only PDF links (no direct URL): {len([a for a in all_articles if a.pdf_url and not a.url])}")
+        self.logger.info(f"All initial issues: {len(issues_pages)}")
+        self.logger.info(f"Total issues with only PDF links (no direct URL): {len(issue_urls_not_pdf)}")
+        self.logger.info(f"Total issues with articles: {len(issues_pages)- len(issue_urls_not_pdf)}")
+        self.logger.info(f"Total articles extracted: {len(all_articles)}")
+
 
         return all_articles
