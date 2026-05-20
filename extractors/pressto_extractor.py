@@ -1,31 +1,36 @@
 import json
+import logging
 from pathlib import Path
 import re
 import time
 
 import pdfplumber
-from langdetect import DetectorFactory, LangDetectException, detect, detect_langs
+from polyglot.detect import Detector
 
 from utils.issue import ArticleData
 
 from .extractor import Extractor
 
+logging.getLogger("polyglot.detect.base").setLevel(logging.ERROR)
+
 # Tuning constants for size grouping and annotation filtering.
-SIZE_TOLERANCE = 0.05
+SIZE_TOLERANCE = 0.8 # 0.05
 SEPARATOR_LINEWIDTH = 0.5
-ANNOTATION_MAX_SIZE = 6.0
-ANNOTATION_BASELINE_DELTA = 4.0
+NEWLINE_LINEWIDTH = 2.0
+ANNOTATION_MAX_SIZE = 7.0
+ANNOTATION_BASELINE_DELTA = 3.0
 STOP_MARKERS = ["references / bibliografia", "summary"]
 LINE_Y_TOLERANCE = 2.0
-TABLE_START_RE = re.compile(r"^(tabela|rysunek)\s+\d+", re.IGNORECASE)
+TABLE_START_RE = re.compile(
+    r"^(tabela|rysunek|wykres)\s+\d+\s?$",
+    re.IGNORECASE,
+)
 SOURCE_RE = re.compile(r"^źródło:", re.IGNORECASE)
 CITATION_STOP_RE = re.compile(r",\s*[A-ZĄĆĘŁŃÓŚŹŻ]\.\s+.*\(\d{4}\)")
 CITATION_STOP_MARKER = "__STOP_CITATION__"
 LANGDETECT_LOG_NAME = "langdetect_removed.txt"
 MIN_LANGDETECT_CHARS = 500
-
-DetectorFactory.seed = 0
-
+BAD_FRAGMENT_LOG_NAME = "bad_fragments.log"
 
 
 ARTICLE_VIEW_RE = re.compile(r"/article/view/(\d+)")
@@ -35,6 +40,7 @@ class PresstoExtractor(Extractor):
         super().__init__()
         self.output_dir = Path(output_dir) if output_dir else Path(".")
         self.skip_download = skip_download
+        self.notified_about_matrix = False
 
     @staticmethod
     def _article_id_from_url(article_url: str | None) -> str | None:
@@ -80,6 +86,30 @@ class PresstoExtractor(Extractor):
         return top, bottom
 
 
+    # Detect visual separator lines that should force a text newline.
+    def _compute_newline_separators(
+        self,
+        page: pdfplumber.page.Page,
+    ) -> list[float]:
+        page_height = float(page.height)
+        separators: list[float] = []
+
+        for line in page.lines:
+            linewidth = line.get("linewidth")
+            if linewidth is None:
+                continue
+
+            if abs(float(linewidth) - NEWLINE_LINEWIDTH) > 1e-6:
+                continue
+
+            line_top = self._line_pos_from_top(line, page_height)
+            if line_top is None:
+                continue
+
+            separators.append(float(line_top))
+
+        return sorted(separators)
+
     # Detect separator lines and compute ignore cutoffs.
     def _compute_cutoffs(self, page: pdfplumber.page.Page) -> tuple[float | None, float | None]:
         page_height = float(page.height)
@@ -92,7 +122,7 @@ class PresstoExtractor(Extractor):
             line_top = self._line_pos_from_top(line, page_height)
             if line_top is None:
                 continue
-            if line_top > page_height * 0.5:
+            if line_top > page_height * 0.25 and abs(line['width'] - 51.024) < 1.0:
                 bottom_cutoff = line_top if bottom_cutoff is None else min(bottom_cutoff, line_top)
             if line_top < page_height * 0.25:
                 top_cutoff = line_top if top_cutoff is None else max(top_cutoff, line_top)
@@ -105,6 +135,8 @@ class PresstoExtractor(Extractor):
         bottom_cutoff, top_cutoff = self._compute_cutoffs(page)
         filtered_chars: list[dict] = []
         prev_base_y0 = None
+        prev_base_y1 = None
+        
         for char in page.chars:
             top, bottom = self._char_bounds_from_top(char, page_height)
             if top is None or bottom is None:
@@ -113,71 +145,109 @@ class PresstoExtractor(Extractor):
                 continue
             if top_cutoff is not None and bottom < top_cutoff:
                 continue
+
+            # remove non horizontal text
+            matrix = char.get("matrix")
+            if matrix[1] != 0.0 or matrix[2] != 0.0:
+                if not self.notified_about_matrix:
+                    self.logger.info(f"Filtering out characters with non-horizontal matrix (e.g. rotated text). Page: {page}.")
+                    self.notified_about_matrix = True
+                continue
+
+            # Remove ####-ing invisible characters:
+            non_stroking_color = char.get("non_stroking_color")
+            if len(non_stroking_color) == 1 and non_stroking_color[0] == 0.0:
+                continue
+
+            
             size = char.get("size")
             base_y0 = char.get("y0")
+            base_y1 = char.get("y1")
+            
             if (
                 size is not None
                 and base_y0 is not None
+                and base_y1 is not None
                 and size < ANNOTATION_MAX_SIZE
                 and prev_base_y0 is not None
-                and (float(base_y0) - float(prev_base_y0)) >= ANNOTATION_BASELINE_DELTA
+                and prev_base_y1 is not None
+                and (
+                    # Superscript check: current baseline (y0) is significantly higher than previous
+                    (float(base_y0) - float(prev_base_y0)) >= ANNOTATION_BASELINE_DELTA
+                    or 
+                    # Subscript check: current top (y1) is significantly lower than previous
+                    (float(prev_base_y1) - float(base_y1)) >= ANNOTATION_BASELINE_DELTA
+                )
             ):
                 continue
+
             filtered_chars.append(char)
+            
+            # Update previous positions for the next iteration
             if base_y0 is not None:
                 prev_base_y0 = float(base_y0)
+            if base_y1 is not None:
+                prev_base_y1 = float(base_y1)
+                
         return filtered_chars
 
 
     # Remove table/figure blocks between heading and source line.
-    def _filter_table_blocks(self, page: pdfplumber.page.Page, chars: list[dict]) -> list[dict]:
+    def _filter_table_blocks(
+        self,
+        page: pdfplumber.page.Page,
+        chars: list[dict],
+        in_table_block: bool = False,   # persisted across pages
+    ) -> tuple[list[dict], bool]:
+        """
+        Remove table/figure blocks between a heading and its source line.
+
+        Returns:
+            kept_chars,
+            updated_in_table_block
+        """
         page_height = float(page.height)
-        ordered: list[tuple[float, float, dict]] = []
+
+        # Vertical spans of each table, from top to bottom, for current page
+        tables_spans: list[list[int]] = []
+
+        page_lines = page.extract_text_lines()
+
+        is_in_table_block = in_table_block
+
+
+        table_start = None if not is_in_table_block else float(0.0)
+        table_end = None
+        for line in page_lines:
+            if TABLE_START_RE.match(line["text"]):
+                table_start = line["top"]
+                is_in_table_block = True
+            if SOURCE_RE.match(line["text"]):
+                table_end = line["top"]
+
+            if table_start is not None and table_end is not None:
+                tables_spans.append([table_start,table_end])
+                table_start = None
+                table_end = None
+                is_in_table_block = False
+
+        if table_start:
+            table_end = page_height
+            tables_spans.append([table_start,table_end])
+            is_in_table_block = True
+
+        filtered_chars = []
         for char in chars:
-            top, _ = self._char_bounds_from_top(char, page_height)
-            x0 = char.get("x0")
-            if top is None or x0 is None:
-                continue
-            ordered.append((float(top), float(x0), char))
+            is_in_table = False
+            for table in tables_spans:
+                if char['top'] >= table[0] and char['top'] <= table[1]:
+                    is_in_table = True
+                    break
+            if not is_in_table:
+                filtered_chars.append(char)
 
-        ordered.sort(key=lambda item: (item[0], item[1]))
-
-        lines: list[tuple[float, list[dict]]] = []
-        current_top = None
-        current_chars: list[dict] = []
-        for top, _x0, char in ordered:
-            if current_top is None or abs(top - current_top) > LINE_Y_TOLERANCE:
-                if current_chars:
-                    lines.append((current_top, current_chars))
-                current_top = top
-                current_chars = [char]
-            else:
-                current_chars.append(char)
-        if current_chars:
-            lines.append((current_top, current_chars))
-
-        kept: list[dict] = []
-        in_block = False
-        for _top, line_chars in lines:
-            line_chars_sorted = sorted(line_chars, key=lambda c: float(c.get("x0", 0.0)))
-            line_text = "".join([c.get("text", "") for c in line_chars_sorted])
-            normalized = " ".join(line_text.split())
-            if not normalized:
-                kept.extend(line_chars_sorted)
-                continue
-
-            if not in_block and TABLE_START_RE.match(normalized):
-                in_block = True
-                continue
-            if in_block:
-                if SOURCE_RE.match(normalized):
-                    in_block = False
-                continue
-
-            kept.extend(line_chars_sorted)
-
-        return kept
-
+        return filtered_chars, is_in_table_block
+    
 
     # Merge consecutive characters by font size into text blocks.
     def _merge_by_size(
@@ -185,8 +255,13 @@ class PresstoExtractor(Extractor):
         chars: list[dict],
         page_index: int,
         page_width: float,
+        source_name: str | None,
+        newline_separators: list[float] | None = None,
         state: tuple[float | None, bool | None, list[str], int | None] | None = None,
     ) -> tuple[list[tuple[str, int]], tuple[float | None, bool | None, list[str], int | None]]:
+        def non_space_len(value: str) -> int:
+            return sum(1 for ch in value if not ch.isspace())
+
         def is_bold(fontname: str | None) -> bool:
             if not fontname:
                 return False
@@ -194,6 +269,8 @@ class PresstoExtractor(Extractor):
 
         def is_letter(value: str) -> bool:
             return bool(value) and value.isalpha()
+
+        passed_separators: set[float] = set()
 
         merged_lines: list[tuple[str, int]] = []
         if state:
@@ -203,8 +280,34 @@ class PresstoExtractor(Extractor):
             current_bold = None
             current_text = []
             last_page_index = page_index
+        current_chars: list[dict] = []
+        fragment_prev_char = None
         prev_char = None
+        last_stream_char = None
         for char_index, char in enumerate(chars):
+            char_top = char.get("top")
+
+            if char_top is not None and newline_separators:
+                for separator_y in newline_separators:
+                    if separator_y in passed_separators:
+                        continue
+
+                    # Text moved below the separator line.
+                    if float(char_top) > separator_y:
+                        if current_text:
+                            line_text = "".join(current_text).strip()
+                            if line_text:
+                                merged_lines.append((line_text, last_page_index or page_index))
+                            
+                            current_text = []
+                            current_chars = []
+                            fragment_prev_char = None
+
+                        # Force logical newline.
+                        merged_lines.append(("", last_page_index or page_index))
+
+                        passed_separators.add(separator_y)
+
             size = char.get("size")
             text = char.get("text", "")
             bold = is_bold(char.get("fontname"))
@@ -221,21 +324,21 @@ class PresstoExtractor(Extractor):
             )
             bold_changed = bold_for_break != current_bold
             if size_changed or bold_changed:
-                if size_changed:
-                    print(
-                        "Page {page} char {idx}: size {old:.3f} -> {new:.3f}"
-                        .format(
-                            page=page_index,
-                            idx=char_index,
-                            old=current_size if current_size is not None else -1.0,
-                            new=size if size is not None else -1.0,
-                        )
-                    )
-                if bold_changed:
-                    print(
-                        "Page {page} char {idx}: bold {old} -> {new}"
-                        .format(page=page_index, idx=char_index, old=current_bold, new=bold_for_break)
-                    )
+                # if size_changed:
+                #     print(
+                #         "Page {page} char {idx}: size {old:.3f} -> {new:.3f}"
+                #         .format(
+                #             page=page_index,
+                #             idx=char_index,
+                #             old=current_size if current_size is not None else -1.0,
+                #             new=size if size is not None else -1.0,
+                #         )
+                #     )
+                # if bold_changed:
+                #     print(
+                #         "Page {page} char {idx}: bold {old} -> {new}"
+                #         .format(page=page_index, idx=char_index, old=current_bold, new=bold_for_break)
+                #     )
                 if current_text:
                     line_text = "".join(current_text).strip()
                     if line_text:
@@ -243,12 +346,18 @@ class PresstoExtractor(Extractor):
                             merged_lines.append((CITATION_STOP_MARKER, last_page_index or page_index))
                         else:
                             merged_lines.append((line_text, last_page_index or page_index))
+                       
                     current_text = []
+                    current_chars = []
+                    fragment_prev_char = None
                 merged_lines.append(("", last_page_index or page_index))
+                fragment_prev_char = last_stream_char
                 current_text.append(text)
+                current_chars.append(char)
                 current_size = size
                 current_bold = bold_for_break
                 prev_char = None
+                last_stream_char = char
                 continue
 
             if prev_char and prev_char.get("text") == "-" and current_text and current_text[-1] == "-":
@@ -285,14 +394,20 @@ class PresstoExtractor(Extractor):
                 ):
                     current_text.pop()
 
+            if not current_text:
+                fragment_prev_char = last_stream_char
             current_text.append(text)
+            current_chars.append(char)
             prev_char = char
+            last_stream_char = char
 
         if current_text:
             line_text = "".join(current_text).strip()
             if line_text and CITATION_STOP_RE.search(line_text):
                 merged_lines.append((CITATION_STOP_MARKER, last_page_index or page_index))
                 current_text = []
+                current_chars = []
+                
         return merged_lines, (current_size, current_bold, current_text, last_page_index)
 
 
@@ -324,17 +439,15 @@ class PresstoExtractor(Extractor):
             if not line.strip():
                 kept.append(line)
                 continue
-            if len(line) < MIN_LANGDETECT_CHARS:
-                kept.append(line)
-                continue
             try:
-                lang = detect(line)
-                langs = detect_langs(line)
-            except LangDetectException:
+                detector = Detector(line, quiet=True)
+                langs = detector.languages
+                lang = langs[0].code if langs else None
+            except Exception:
                 kept.append(line)
                 continue
-            if lang == "en":
-                probs = ",".join(f"{item.lang}:{item.prob:.3f}" for item in langs)
+            probs = ",".join(f"{item.code}:{item.confidence:.3f}" for item in langs)
+            if lang == "en" and langs[0].confidence >= 90.0:
                 removed.append((page_no, line, probs))
                 continue
             kept.append(line)
@@ -342,7 +455,8 @@ class PresstoExtractor(Extractor):
         if removed:
             with open(log_path, "a", encoding="utf-8") as f:
                 for page_no, line, probs in removed:
-                    f.write(f"{pdf_path.name}\tpage {page_no}\t{probs}\t{line}\n")
+                    f.write(f"{pdf_path.parent.name}\tpage {page_no}\t{probs}\t{line}\n")
+                f.write("\n")
 
         return kept
     
@@ -351,20 +465,33 @@ class PresstoExtractor(Extractor):
             all_pages_output: list[tuple[str, int]] = []
             stop_all = False
             merge_state: tuple[float | None, bool | None, list[str], int | None] | None = None
+            in_table_block = False
+
             for page_index, page in enumerate(pdf.pages, start=1):
                 if stop_all:
                     break
-                if page_index == 12:
-                    with open("page_12_chars.json", "w", encoding="utf-8") as f:
-                        json.dump(page.chars, f, ensure_ascii=False, indent=2)
+                
+                # First, we remove any characters below annotation line and above header line
+                # Also, we delete any non horizontal text and super/subscript
                 filtered_chars = self._filter_chars(page)
-                filtered_chars = self._filter_table_blocks(page, filtered_chars)
+
+                # Now we remove table/figures, with persistant state between pages
+                filtered_chars, in_table_block = self._filter_table_blocks(page, filtered_chars, in_table_block)
+
+                # For the thick, 2.0 width lines separating english from polish
+                newline_separators = self._compute_newline_separators(page)
+
+                # Merge chars into whole text fragments
+                # detects size changes, font changes to separate by fragments
                 merged_lines, merge_state = self._merge_by_size(
                     filtered_chars,
                     page_index,
                     float(page.width),
+                    pdf_path.name,
+                    newline_separators,
                     merge_state,
                 )
+
                 trimmed_lines, stop_all = self._truncate_on_markers(merged_lines)
                 all_pages_output.extend(trimmed_lines)
 
@@ -377,11 +504,14 @@ class PresstoExtractor(Extractor):
             log_path = self.output_dir / LANGDETECT_LOG_NAME
             filtered_output = self._filter_english_lines(all_pages_output, pdf_path, log_path)
             cleaned_output = [line.rstrip() for line in filtered_output]
-            return "\n".join(cleaned_output)
+            final_text = "\n".join(cleaned_output)
+            final_text = re.sub(r"\n{3,}", "\n\n", final_text)
 
-    def extract(self, data, limit: int = None):
+            return final_text
+
+    def extract(self, data, limit: int = None, start_at_index: int = 0):
         self.logger.info("Phase 1: downloading PDFs")
-        articles = data[:limit] if limit else data
+        articles = data[:limit+start_at_index] if limit else data
         export_root = self.output_dir / "data" / "pressto"
         export_root.mkdir(parents=True, exist_ok=True)
 
@@ -419,6 +549,8 @@ class PresstoExtractor(Extractor):
         self.logger.info("Phase 2: extracting text and license")
         extraction_times: list[float] = []
         for index, article in enumerate(articles):
+            if index < start_at_index:
+                continue
             if extraction_times:
                 avg_text = sum(extraction_times) / len(extraction_times)
                 remaining = total_articles - (index + 1)

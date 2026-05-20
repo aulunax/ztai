@@ -46,5 +46,5 @@ class Extractor(ABC):
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
     @abstractmethod
-    def extract(self, data, limit: int = None):
+    def extract(self, data, limit: int = None, start_at_index: int = 0):
         pass

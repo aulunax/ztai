@@ -20,6 +20,7 @@ def process_site(
     sejm_issues_file: str = None,
     skip_download: bool = False,
     skip_crawl_load: bool = False,
+    start_at_index: int = 0,
 ):
     site_start = time.perf_counter()
     path_to_write = Path(output_dir) if output_dir else Path(".")
@@ -83,7 +84,7 @@ def process_site(
             site,
             output_dir=output_dir,
             skip_download=skip_download,
-        ).extract(data, extract_limit)
+        ).extract(data, extract_limit, start_at_index=start_at_index)
         extract_duration = time.perf_counter() - extract_start
         logger.info("Finished extraction for %s in %.2fs.", site, extract_duration)
 
@@ -112,6 +113,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--issue-limit", type=int, help="Optional limit for issues to process")
     parser.add_argument("--extract-limit", type=int, help="Optional limit for articles to process in extraction phase")
+    parser.add_argument("--start-at-index", type=int, default=0, help="Index of the first article to process in extraction phase")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker threads to use for crawling")
     return parser.parse_args()
 
@@ -161,6 +163,7 @@ if __name__ == "__main__":
             sejm_issues_file if site == "sejm" else None,
             args.skip_download,
             args.skip_crawl_load,
+            args.start_at_index,
         )
 
     run_duration = time.perf_counter() - run_start

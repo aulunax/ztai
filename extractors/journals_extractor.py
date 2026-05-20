@@ -35,7 +35,7 @@ class JournalsExtractor(Extractor):
         folder_name = f"{index + 1:04d}_{self._safe_path_part(article_id)}"
         return root / folder_name
 
-    def extract(self, data, limit: int = None):
+    def extract(self, data, limit: int = None, start_at_index: int = 0):
         if self.skip_download:
             self.logger.info("Phase: downloading PDFs (skipped)")
             return
@@ -48,6 +48,8 @@ class JournalsExtractor(Extractor):
         total_articles = len(articles)
         download_times: list[float] = []
         for index, article in enumerate(articles):
+            if index < start_at_index:
+                continue
             if download_times:
                 avg = sum(download_times) / len(download_times)
                 remaining = total_articles - (index + 1)

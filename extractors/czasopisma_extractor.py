@@ -587,7 +587,7 @@ class CzasopismaExtractor(Extractor):
         folder_name = f"{index + 1:04d}_{self._safe_path_part(article_id)}"
         return root / folder_name
 
-    def extract(self, data, limit: int = None):
+    def extract(self, data, limit: int = None, start_at_index: int = 0):
         self.logger.info("Extracting data from PDF content...")
         articles = data[:limit] if limit else data
         export_root = self.output_dir / "data" / "czasopisma"
@@ -613,6 +613,8 @@ class CzasopismaExtractor(Extractor):
         self.logger.info("Phase 2: extracting text and license")
         extraction_times: list[float] = []
         for index, article in enumerate(articles):
+            if index < start_at_index:
+                continue
             if extraction_times:
                 avg_text = sum(extraction_times) / len(extraction_times)
                 remaining = total_articles - (index + 1)
