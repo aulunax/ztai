@@ -1422,3 +1422,6 @@
 0001_11788	page 18	en:94.000,un:0.000,un:0.000	DOI: https://doi.org/10.1037/0033-2909.84.4.634
 0001_11788	page 19	en:96.000,un:0.000,un:0.000	DOI: https://doi.org/10.1146/annurev.soc.22.1.459
 
+0001_3913	page 1	en:99.000,un:0.000,un:0.000	The Problem of the Subjective Scope of the Taxation with Tax on Goods and Services of Leasing the Property Constituting the Co-ownership
+0001_3913	page 16	en:99.000,un:0.000,un:0.000	property; co-ownership; quoad usum division; administrator; lease; tax on goods and services; service; taxpayer
+

@@ -25,31 +25,27 @@
 import json
 from pathlib import Path
 
-from paddleocr import PaddleOCR
-from pdf2image import convert_from_path
-
-# Initialize OCR
-ocr = PaddleOCR(
-    use_angle_cls=True,
-    lang='en'
-)
+from paddleocr import PaddleOCRVL
 
 # Convert PDF pages to images
-pages = convert_from_path("output/data/pressto/0969_16183/article.pdf", dpi=200)
+input_file = "./table.pdf"
+output_dir = Path("./output_paddle")
+output_dir.mkdir(parents=True, exist_ok=True)
 
-# OCR each page
-for i, page in enumerate(pages):
-    image_path = f"page_{i}.png"
-    page.save(image_path, "PNG")
+pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", vl_rec_server_url="http://localhost:8118/v1")
 
-    result = ocr.predict(image_path, cls=True)
+output = pipeline.predict(input=input_file)
 
-    print(f"\n--- PAGE {i + 1} ---")
+pages_res = list(output)
 
-    # for line in result[0]:
-    #     text = line[1][0]
-    #     confidence = line[1][1]
-    #     print(f"{confidence:.2f}  {text}")
+output = pipeline.restructure_pages(pages_res)
+# output = pipeline.restructure_pages(pages_res, merge_tables=True) # Merge tables across pages
+# output = pipeline.restructure_pages(pages_res, merge_tables=True, relevel_titles=True) # Merge tables across pages and reconstruct multi-level titles
+# output = pipeline.restructure_pages(pages_res, merge_tables=True, relevel_titles=True, concatenate_pages=True) # Merge tables across pages, reconstruct multi-level titles, and merge multiple pages
 
-    with Path("testOcr.json").open("w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+for res in output:
+    res.print() ## Print the structured prediction output
+    res.save_to_json(save_path=output_dir) ## Save the current image's structured result in JSON format
+    res.save_to_markdown(save_path=output_dir) ## Save the current image's result in Markdown format
+
+

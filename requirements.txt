@@ -7,5 +7,7 @@ pypdf
 pymupdf4llm
 unstructured[all-docs]
 marker-pdf
-textract
+# textract
 langdetect
+polyglot
+pyicu

@@ -19,7 +19,7 @@ JOURNALS_SEPARATOR_LINEWIDTH = 0.5
 JOURNALS_NEWLINE_LINEWIDTH = 2.0
 JOURNALS_ANNOTATION_MAX_SIZE = 7.0
 JOURNALS_ANNOTATION_BASELINE_DELTA = 3.0
-JOURNALS_STOP_MARKERS = ["references / bibliografia", "summary"]
+JOURNALS_STOP_MARKERS = ["bibliografia", "summary"]
 JOURNALS_LINE_Y_TOLERANCE = 2.0
 JOURNALS_TABLE_START_RE = re.compile(
     r"^(tabela|rysunek|wykres|schemat|mapa)\s+\d+\s?$",
@@ -32,6 +32,8 @@ JOURNALS_LANGDETECT_LOG_NAME = "langdetect_removed.txt"
 JOURNALS_MIN_LANGDETECT_CHARS = 500
 JOURNALS_BAD_FRAGMENT_LOG_NAME = "bad_fragments.log"
 
+def is_stop_marker(text: str) -> bool:
+    return text.strip().lower() in JOURNALS_STOP_MARKERS
 
 ARTICLE_VIEW_RE = re.compile(r"/article/view/(\d+)")
 
@@ -533,6 +535,123 @@ class JournalsExtractor(Extractor):
 
             return final_text
 
+        
+
+    def _strip_annotations(self, text: str, remove_unicode_superscripts: bool = True) -> str:
+        """
+        Removes:
+        - LaTeX-style annotations like ^{7}, ^7
+        - Unicode superscripts like ², ³, ⁴
+        """
+
+        # 1. Remove LaTeX-style superscripts: ^{7}, ^{12}
+        text = re.sub(r"\$\s*\^\{\d+\}\s*\$", "", text)
+
+        if remove_unicode_superscripts:
+            text = re.sub(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+", "", text)
+
+        return text
+
+    def _extract_blocks(self, res):
+        return [
+            {
+                "label": block["block_label"],
+                "text": block["block_content"],
+                "bbox": block["block_bbox"],
+            }
+            for block in res["parsing_res_list"]
+            if block.get("block_content")  # optional safety filter
+        ]
+
+    # docker run     -it     --rm     --gpus all   -p 8119:8119     -v $(pwd)/vllm_config.yml:/tmp/vllm_config.yml:ro  ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-genai-vllm-server:latest-nvidia-gpu-offline     paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --host 0.0.0.0 --port 8119 --backend vllm --backend_config /tmp/vllm_config.yml
+    def _extract_text_from_pdf_ocr(self, pdf_path: Path) -> str:
+        from paddleocr import PaddleOCRVL
+        try:
+            pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", vl_rec_server_url="http://localhost:8119/v1")
+
+            output = pipeline.predict(input=str(pdf_path), lang="pl", text_det_thresh=0.3, text_det_box_thresh=0.6, text_det_unclip_ratio=2.0, text_rec_score_thresh=0.0)
+
+            pages_res = list(output)
+
+            output = pipeline.restructure_pages(pages_res, merge_tables=True, relevel_titles=True, concatenate_pages=True)
+
+            pdf_full = output[0].json['res']
+
+            blocks = self._extract_blocks(pdf_full)
+
+            filtered_blocks = []
+            for block in blocks:
+                if block["label"] in ("text", "paragraph_title"):
+                    block["text"] = self._strip_annotations(block["text"])
+                    filtered_blocks.append(block)
+
+            cut_index = None
+
+            for i, block in enumerate(filtered_blocks):
+                if is_stop_marker(block["text"]):
+                    cut_index = i
+                    break
+
+            if cut_index is not None:
+                filtered_blocks = filtered_blocks[:cut_index]
+
+
+            merged_text_blocks = []
+            current_text_blocks = []
+            for block in filtered_blocks:
+                if block["label"] == "paragraph_title":
+                    if current_text_blocks:
+                        merged_text_blocks.append(" ".join(block["text"] for block in current_text_blocks))
+                        current_text_blocks = []
+                    merged_text_blocks.append(block["text"])
+                else:
+                    current_text_blocks.append(block)
+
+            if current_text_blocks:
+                merged_text_blocks.append(" ".join(block["text"] for block in current_text_blocks))
+
+
+            # create a text file with just the text content of the blocks, separated by newlines
+            text_output = "\n\n".join(text for text in merged_text_blocks)
+
+            # import language_tool_python
+
+            # tool = language_tool_python.LanguageTool('pl-PL')
+
+            # matches = tool.check(text_output)
+
+            # corrected = language_tool_python.utils.correct(text_output, matches)
+
+            # return corrected
+
+            # from symspellpy import SymSpell, Verbosity
+
+            # sym_spell = SymSpell(max_dictionary_edit_distance=2)
+
+            # sym_spell.load_dictionary("pl_full.txt", term_index=0, count_index=1)
+
+            # result = sym_spell.lookup("mozna", Verbosity.CLOSEST, max_edit_distance=2)
+
+            # print(result[0].term)
+
+            return text_output
+
+            with Path("test_paddle_output_my.json").open("w", encoding="utf-8") as f:
+                json.dump(pdf_full, f, ensure_ascii=False, indent=2)
+
+            for res in output:
+                print("a")
+                res.save_to_json(save_path="test_paddle_output.json")  # get the structured result as a dict
+                res.save_to_markdown(save_path="test_paddle_output.md")
+
+            # save output to file
+            with Path("test_paddle_output_my.json").open("w", encoding="utf-8") as f:
+                json.dump(pdf_full, f, ensure_ascii=False, indent=2)
+
+        except Exception as exc:
+            self.logger.warning("PaddleOCR extraction failed for %s: %s", pdf_path, exc)
+            return ""
+
     def extract(self, data, limit: int = None, start_at_index: int = 0):
         self.logger.info("Phase 1: downloading PDFs")
         articles = data[:limit+start_at_index] if limit else data
@@ -595,7 +714,7 @@ class JournalsExtractor(Extractor):
 
             phase_start = time.perf_counter()
             try:
-                extracted_text = self._extract_text_from_pdf(pdf_path)
+                extracted_text = self._extract_text_from_pdf_ocr(pdf_path)
             except Exception as exc:
                 self.logger.warning("Failed to extract PDF text for %s: %s", article_dir, exc)
                 continue

@@ -12,6 +12,7 @@ from utils.issue import ArticleData
 from .extractor import Extractor
 
 logging.getLogger("polyglot.detect.base").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Tuning constants for size grouping and annotation filtering.
 SIZE_TOLERANCE = 0.8 # 0.05
@@ -532,6 +533,26 @@ class PresstoExtractor(Extractor):
             final_text = re.sub(r"\n{3,}", "\n\n", final_text)
 
             return final_text
+        
+    def _extract_text_from_pdf_ocr(self, pdf_path: Path) -> str:
+        from paddleocr import PaddleOCRVL
+        try:
+            pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", vl_rec_server_url="http://localhost:8118/v1")
+
+            output = pipeline.predict(input=pdf_path)
+
+            pages_res = list(output)
+
+            output = pipeline.restructure_pages(pages_res, merge_tables=True, relevel_titles=True, concatenate_pages=True)
+
+            # save output to file
+            with Path("test_paddle_output.json").open("w", encoding="utf-8") as f:
+                for res in output:
+                    json.dump(res, f, ensure_ascii=False, indent=2)
+
+        except Exception as exc:
+            self.logger.warning("PaddleOCR extraction failed for %s: %s", pdf_path, exc)
+            return ""
 
     def extract(self, data, limit: int = None, start_at_index: int = 0):
         self.logger.info("Phase 1: downloading PDFs")
@@ -595,7 +616,7 @@ class PresstoExtractor(Extractor):
 
             phase_start = time.perf_counter()
             try:
-                extracted_text = self._extract_text_from_pdf(pdf_path)
+                extracted_text = self._extract_text_from_pdf_ocr(pdf_path)
             except Exception as exc:
                 self.logger.warning("Failed to extract PDF text for %s: %s", article_dir, exc)
                 continue
