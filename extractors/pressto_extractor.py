@@ -22,7 +22,7 @@ ANNOTATION_BASELINE_DELTA = 3.0
 STOP_MARKERS = ["references / bibliografia", "summary"]
 LINE_Y_TOLERANCE = 2.0
 TABLE_START_RE = re.compile(
-    r"^(tabela|rysunek|wykres)\s+\d+\s?$",
+    r"^(tabela|rysunek|wykres|schemat|mapa)\s+\d+\s?$",
     re.IGNORECASE,
 )
 SOURCE_RE = re.compile(r"^źródło:", re.IGNORECASE)
@@ -136,14 +136,22 @@ class PresstoExtractor(Extractor):
         filtered_chars: list[dict] = []
         prev_base_y0 = None
         prev_base_y1 = None
+
+        count_top_cutoff = 0
+        count_bottom_cutoff = 0
+        count_matrix = 0
+        count_annotation = 0
+        count_invisible = 0
         
         for char in page.chars:
             top, bottom = self._char_bounds_from_top(char, page_height)
             if top is None or bottom is None:
                 continue
             if bottom_cutoff is not None and top > bottom_cutoff:
+                count_bottom_cutoff += 1
                 continue
             if top_cutoff is not None and bottom < top_cutoff:
+                count_top_cutoff += 1
                 continue
 
             # remove non horizontal text
@@ -152,11 +160,14 @@ class PresstoExtractor(Extractor):
                 if not self.notified_about_matrix:
                     self.logger.info(f"Filtering out characters with non-horizontal matrix (e.g. rotated text). Page: {page}.")
                     self.notified_about_matrix = True
+                count_matrix += 1
                 continue
 
             # Remove ####-ing invisible characters:
             non_stroking_color = char.get("non_stroking_color")
-            if len(non_stroking_color) == 1 and non_stroking_color[0] == 0.0:
+            stroking_color = char.get("stroking_color")
+            if len(non_stroking_color) == 1 and non_stroking_color[0] == 0.0 and len(stroking_color) != 1:
+                count_invisible += 1
                 continue
 
             
@@ -179,6 +190,7 @@ class PresstoExtractor(Extractor):
                     (float(prev_base_y1) - float(base_y1)) >= ANNOTATION_BASELINE_DELTA
                 )
             ):
+                count_annotation += 1
                 continue
 
             filtered_chars.append(char)
@@ -189,6 +201,7 @@ class PresstoExtractor(Extractor):
             if base_y1 is not None:
                 prev_base_y1 = float(base_y1)
                 
+        print(f"Page {page.page_number}: Filtered {count_top_cutoff} chars above top cutoff, {count_bottom_cutoff} chars below bottom cutoff, {count_matrix} chars with non-horizontal matrix, {count_annotation} chars likely annotations, {count_invisible} invisible chars. Kept {len(filtered_chars)} chars.")
         return filtered_chars
 
 
@@ -470,16 +483,27 @@ class PresstoExtractor(Extractor):
             for page_index, page in enumerate(pdf.pages, start=1):
                 if stop_all:
                     break
+
+                if page_index == 1:
+                    print(page.extract_text_lines(return_chars=False))
                 
                 # First, we remove any characters below annotation line and above header line
                 # Also, we delete any non horizontal text and super/subscript
                 filtered_chars = self._filter_chars(page)
+
+                                
+                if page_index == 7:
+                    with Path("test_aa.json").open("w", encoding="utf-8") as f:
+                        json.dump(page.chars, f, ensure_ascii=False, indent=2)
 
                 # Now we remove table/figures, with persistant state between pages
                 filtered_chars, in_table_block = self._filter_table_blocks(page, filtered_chars, in_table_block)
 
                 # For the thick, 2.0 width lines separating english from polish
                 newline_separators = self._compute_newline_separators(page)
+
+
+
 
                 # Merge chars into whole text fragments
                 # detects size changes, font changes to separate by fragments
