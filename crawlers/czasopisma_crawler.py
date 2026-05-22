@@ -34,8 +34,13 @@ class CzasopismaCrawler(Crawler):
     def _get_articles_from_issue_page(self, html: str):
         soup = BeautifulSoup(html, "html.parser")
         issue_name = soup.find("main").find("h2").text.strip()
-        article_divs = soup.find_all("div", class_="card")
-        article_divs = article_divs[1:-1]  # Skip the first and last one which are not articles
+        sections = soup.find_all("div", class_="section")
+        article_section = None
+        for section in sections:
+            if section.find("h2").text.strip().lower() == "artykuły": 
+                article_section = section
+                break
+        article_divs = article_section.find_all("div", class_="card")
 
         articles = []
         for article_div in article_divs:

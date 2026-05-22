@@ -13,6 +13,7 @@ logger = logging.getLogger("ScraperMain")
 def process_site(
     site: str,
     skip_extraction: bool,
+    skip_text_extraction: bool,
     issue_limit: int,
     extract_limit: int,
     workers: int,
@@ -84,6 +85,7 @@ def process_site(
             site,
             output_dir=output_dir,
             skip_download=skip_download,
+            skip_text_extraction=skip_text_extraction,
         ).extract(data, extract_limit, start_at_index=start_at_index)
         extract_duration = time.perf_counter() - extract_start
         logger.info("Finished extraction for %s in %.2fs.", site, extract_duration)
@@ -104,6 +106,11 @@ def parse_args() -> argparse.Namespace:
         "--skip-download",
         action="store_true",
         help="Skip PDF download phase for all extractors.",
+    )
+    parser.add_argument(
+        "--skip-text-extraction",
+        action="store_true",
+        help="Skip text extraction phase in extractors (PDFs still downloaded unless --skip-download).",
     )
     parser.add_argument("--skip-extraction", action="store_true", help="Skip extraction phase")
     parser.add_argument(
@@ -141,6 +148,8 @@ if __name__ == "__main__":
         logger.info("Limit for issues to process: %d", args.issue_limit)
     if args.skip_download:
         logger.info("Download phase will be skipped.")
+    if args.skip_text_extraction:
+        logger.info("Text extraction phase will be skipped.")
     if args.extract_limit:
         logger.info("Limit for articles to process: %d", args.extract_limit)
     logger.info("Output directory: %s", args.output_dir if args.output_dir else "stdout")
@@ -156,6 +165,7 @@ if __name__ == "__main__":
         process_site(
             site,
             args.skip_extraction,
+            args.skip_text_extraction,
             args.issue_limit,
             args.extract_limit,
             args.workers,

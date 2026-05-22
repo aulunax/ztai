@@ -5,6 +5,9 @@
 *.pyc
 *.json
 *.zip
+*.pdf
+*.txt
+
 
 data/
 __pycache__/

@@ -530,10 +530,16 @@ def _extract_article_content_from_pdf_path(pdf_path: Path) -> tuple[str, str | N
 
 
 class CzasopismaExtractor(Extractor):
-    def __init__(self, output_dir: str | None = None, skip_download: bool = False):
+    def __init__(
+        self,
+        output_dir: str | None = None,
+        skip_download: bool = False,
+        skip_text_extraction: bool = False,
+    ):
         super().__init__()
         self.output_dir = Path(output_dir) if output_dir else Path(".")
         self.skip_download = skip_download
+        self.skip_text_extraction = skip_text_extraction
 
     def _fetch_soup(self, url: str) -> BeautifulSoup | None:
         try:
@@ -610,6 +616,10 @@ class CzasopismaExtractor(Extractor):
                 else:
                     self.logger.warning("Missing PDF URL for %s", article.url or f"index {index}")
 
+        if self.skip_text_extraction:
+            self.logger.info("Phase 2: extracting text and license (skipped)")
+            return
+
         self.logger.info("Phase 2: extracting text and license")
         extraction_times: list[float] = []
         for index, article in enumerate(articles):
@@ -635,7 +645,9 @@ class CzasopismaExtractor(Extractor):
 
             phase_start = time.perf_counter()
             try:
-                extracted_text, pdf_licence = _extract_article_content_from_pdf_path(pdf_path)
+                extracted_text = super()._extract_text_from_pdf_ocr(pdf_path)
+                pdf_licence = None
+                # extracted_text, pdf_licence = _extract_article_content_from_pdf_path(pdf_path)
             except Exception as exc:
                 self.logger.warning("Failed to extract PDF text for %s: %s", article_dir, exc)
                 continue

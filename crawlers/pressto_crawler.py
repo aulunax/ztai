@@ -29,8 +29,12 @@ class PresstoCrawler(Crawler):
     def _get_articles_from_issue_page(self, html: str):
         soup = BeautifulSoup(html, "html.parser")
         issue_name = soup.find("div", class_="container page-issue").find("h1").text.strip()
-        article_divs = soup.find_all("div", class_="article-summary")
-        article_divs = article_divs[1:]  # Skip the first which are not articles (TOC)
+        sections = soup.find_all("div", class_="issue-toc-section")
+        article_section = None
+        article_divs = []
+        for section in sections:
+            if section.find("h2") and section.find("h2").text.strip().lower() not in ["polemiki", "nekrologi", "----", "przegląd piśmiennictwa", "sprawozdania i informacje"]: 
+                article_divs.extend(section.find_all("div", class_="article-summary"))
 
         articles = []
         for article_div in article_divs:

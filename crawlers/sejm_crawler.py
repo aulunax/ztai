@@ -193,17 +193,37 @@ class SejmCrawler(Crawler):
     def _get_articles_from_issue_page(self, html: str):
         soup = BeautifulSoup(html, "html.parser")
         issue_name = soup.find("h2").text.strip()
-        article_rows= soup.find_all("tr")
+        wanted_headers = {"ARTYKUŁY", "OPINIE", "RECENZJE", "DZIAŁ I. STUDIA I MATERIAŁY"}
+        article_rows = soup.find_all("tr")
 
         articles = []
+        current_header = None
         for article_row in article_rows:
+            header_td = article_row.find("td", colspan="4")
+
+            if header_td:
+                header_text = header_td.find("strong").text.strip().upper()
+                if header_text in wanted_headers:
+                    current_header = header_text
+                continue
+
+            if current_header not in wanted_headers:
+                continue
+
             article_row_cols = article_row.find_all("td")
             if len(article_row_cols) < 4:
                 self.logger.warning(f"Skipping malformed article row in issue {issue_name}: not enough columns")
                 continue
-            article_title = article_row_cols[1].find("a").text.strip()
-            article_url = article_row_cols[1].find("a", href=True)["href"]
-            pdf_link = article_row_cols[3].find("a", href=True)
+
+            if article_row_cols[1].find("a", href=True) is not None:
+                article_title = article_row_cols[1].find("a").text.strip()
+                article_url = article_row_cols[1].find("a", href=True)["href"]
+                pdf_link = article_row_cols[3].find("a", href=True)
+            else:
+                article_title = article_row_cols[1].text.strip()
+                article_url = article_row_cols[3].find("a", href=True)["href"]
+                pdf_link = article_row_cols[3].find("a", href=True)
+
             language = "Polish"
                 
             articles.append(ArticleData(title=article_title, url=article_url, pdf_url=pdf_link["href"] if pdf_link else None, issue=issue_name, journal=self.journal_name, language=language, license=LICENSE_SEJM))

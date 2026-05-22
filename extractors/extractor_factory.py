@@ -5,14 +5,30 @@ from .journals_extractor import JournalsExtractor
 
 class ExtractorFactory:
     @staticmethod
-    def create_extractor(extractor_type, output_dir=None, skip_download=False):
+    def create_extractor(extractor_type, output_dir=None, skip_download=False, skip_text_extraction=False):
         if extractor_type == "pressto":
-            return PresstoExtractor(output_dir=output_dir, skip_download=skip_download)
+            return PresstoExtractor(
+                output_dir=output_dir,
+                skip_download=skip_download,
+                skip_text_extraction=skip_text_extraction,
+            )
         elif extractor_type == "sejm":
-            return SejmExtractor()
+            return SejmExtractor(
+                output_dir=output_dir,
+                skip_download=skip_download,
+                skip_text_extraction=skip_text_extraction,
+            )
         elif extractor_type == "czasopisma":
-            return CzasopismaExtractor(output_dir=output_dir, skip_download=skip_download)
+            return CzasopismaExtractor(
+                output_dir=output_dir,
+                skip_download=skip_download,
+                skip_text_extraction=skip_text_extraction,
+            )
         elif extractor_type == "journals":
-            return JournalsExtractor(output_dir=output_dir, skip_download=skip_download)
+            return JournalsExtractor(
+                output_dir=output_dir,
+                skip_download=skip_download,
+                skip_text_extraction=skip_text_extraction,
+            )
         else:
             raise ValueError("Unknown extractor type")

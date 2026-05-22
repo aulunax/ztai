@@ -28,8 +28,22 @@ class JournalsCrawler(Crawler):
     def _get_articles_from_issue_page(self, html: str):
         soup = BeautifulSoup(html, "html.parser")
         issue_name = soup.find("h2").text.strip()
-        article_tables = soup.find_all("table", class_="tocArticle")
-        article_tables = article_tables[1:]  # Skip the first article (TOC)
+        articles_h4 = soup.find("h4", class_="tocSectionTitle", string="Articles")
+        tables = []
+        for sibling in articles_h4.find_next_siblings():
+            if (
+                sibling.name == "div"
+                and "separator" in sibling.get("class", [])
+            ):
+                break
+
+            if (
+                sibling.name == "table"
+                and "tocArticle" in sibling.get("class", [])
+            ):
+                tables.append(sibling)
+
+        article_tables = tables
 
         articles = []
         for article_table in article_tables:
