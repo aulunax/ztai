@@ -6,6 +6,7 @@ from pathlib import Path
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import re
 
 STOP_MARKERS = ["bibliografia", "summary"]
 
@@ -55,6 +56,32 @@ class Extractor(ABC):
     @abstractmethod
     def extract(self, data, limit: int = None, start_at_index: int = 0):
         pass
+
+    def _strip_annotations(self, text: str, remove_unicode_superscripts: bool = True) -> str:
+        """
+        Removes:
+        - LaTeX-style annotations like ^{7}, ^7
+        - Unicode superscripts like ², ³, ⁴
+        """
+
+        # 1. Remove LaTeX-style superscripts: ^{7}, ^{12}
+        text = re.sub(r"\$\s*\^\{\d+\}\s*\$", "", text)
+
+        if remove_unicode_superscripts:
+            text = re.sub(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+", "", text)
+
+        return text
+
+    def _extract_blocks(self, res):
+        return [
+            {
+                "label": block["block_label"],
+                "text": block["block_content"],
+                "bbox": block["block_bbox"],
+            }
+            for block in res["parsing_res_list"]
+            if block.get("block_content")  # optional safety filter
+        ]
 
     def _extract_text_from_pdf_ocr(self, pdf_path: Path) -> str:
         from paddleocr import PaddleOCRVL
