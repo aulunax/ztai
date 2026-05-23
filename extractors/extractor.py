@@ -21,6 +21,12 @@ class Extractor(ABC):
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.session = self._build_session()
+        self.pipeline = None
+
+    def _load_pipeline(self):
+        if self.pipeline is None:
+            from paddleocr import PaddleOCRVL
+            self.pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", vl_rec_server_url="http://localhost:8119/v1")
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
@@ -89,7 +95,8 @@ class Extractor(ABC):
     def _extract_text_from_pdf_ocr(self, pdf_path: Path) -> str:
         from paddleocr import PaddleOCRVL
         try:
-            pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", vl_rec_server_url="http://localhost:8119/v1")
+            self._load_pipeline()
+            pipeline = self.pipeline
 
             output = pipeline.predict(input=str(pdf_path), lang="pl", text_det_thresh=0.3, text_det_box_thresh=0.6, text_det_unclip_ratio=2.0, text_rec_score_thresh=0.0)
 
