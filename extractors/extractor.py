@@ -1,14 +1,17 @@
 
 from abc import ABC, abstractmethod
+import json
 import logging
 from pathlib import Path
 
+from polyglot.detect import Detector
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import re
+import regex as re
 
 STOP_MARKERS = ["bibliografia", "summary"]
+START_MARKERS = ["", "", ""]
 
 def is_stop_marker(text: str) -> bool:
     return text.strip().lower() in STOP_MARKERS
@@ -65,7 +68,7 @@ class Extractor(ABC):
         """
 
         # 1. Remove LaTeX-style superscripts: ^{7}, ^{12}
-        text = re.sub(r"\$\s*\^\{\d+\}\s*\$", "", text)
+        text = re.sub(r"\s*\$\s*\^\{\d+\}\s*\$\s*", "", text)
 
         if remove_unicode_superscripts:
             text = re.sub(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+", "", text)
@@ -114,6 +117,36 @@ class Extractor(ABC):
             if cut_index is not None:
                 filtered_blocks = filtered_blocks[:cut_index]
 
+            with Path("test_paddle_output_my.json").open("w", encoding="utf-8") as f:
+                json.dump(filtered_blocks, f, ensure_ascii=False, indent=2)
+
+
+            # remove english
+            blocks_no_english = []
+            removed = []
+            for block in filtered_blocks:
+                try:
+                    detector = Detector(block["text"], quiet=True)
+                    langs = detector.languages
+                    lang = langs[0].code if langs else None
+                except Exception:
+                    blocks_no_english.append(block)
+                    continue
+                probs = ",".join(f"{item.code}:{item.confidence:.3f}" for item in langs)
+                if lang == "en" and langs[0].confidence >= 90.0:
+                    removed.append(block)
+                    continue
+                blocks_no_english.append(block)
+
+            if removed:
+                with open("polglot.log", "a", encoding="utf-8") as f:
+                    for block in removed:
+                        f.write(f"{pdf_path.parent.name}\t{probs}\t{block["text"]}\n")
+                    f.write("\n")
+
+            filtered_blocks = blocks_no_english
+
+
             # merge consecutive text blocks
             merged_text_blocks = []
             current_text_blocks = []
@@ -129,6 +162,14 @@ class Extractor(ABC):
             if current_text_blocks:
                 merged_text_blocks.append(" ".join(block["text"] for block in current_text_blocks))
 
+
+            # post-processing
+            for i, text in enumerate(merged_text_blocks):
+                text = text.replace("-\n", "") # merge word continuations on new line into one word
+                text = text.replace("\n", " ") # replace remaining explicit newlines with spaces
+                text = re.sub(r'([\w]+)-\s', r'\1', text, flags=re.UNICODE) # "word- ing" - merge such examples
+                text = re.sub(r"[^\p{L}\p{N}\p{P}\s]", "", text) # remove non letters and non numbers
+                merged_text_blocks[i] = text 
 
             # create a text file with just the text content of the blocks, separated by newlines
             text_output = "\n\n".join(text for text in merged_text_blocks)
