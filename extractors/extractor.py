@@ -141,7 +141,7 @@ class Extractor(ABC):
             if removed:
                 with open("polglot.log", "a", encoding="utf-8") as f:
                     for block in removed:
-                        f.write(f"{pdf_path.parent.name}\t{probs}\t{block["text"]}\n")
+                        f.write(f"{pdf_path.parent.name}\t{probs}\t{block['text']}\n")
                     f.write("\n")
 
             filtered_blocks = blocks_no_english
