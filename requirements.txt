@@ -1,13 +1,13 @@
 beautifulsoup4>=4.12.0
 requests>=2.31.0
 selenium>=4.25.0
-pdfplumber>=0.11.0
-pypdfium2
-pypdf
-pymupdf4llm
-unstructured[all-docs]
-marker-pdf
+#pdfplumber>=0.11.0
+#pypdfium2
+#pypdf
+#pymupdf4llm
+#unstructured[all-docs]
+#marker-pdf
 # textract
-langdetect
+#langdetect
 polyglot
 pyicu
