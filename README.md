@@ -4,7 +4,7 @@ This project contains a web scraping script `scraper.py` configured to crawl and
 
 ## Prerequisites
 
-- You may need to install a GPU-appropriate build of `paddleocr` for your hardware and CUDA version.
+- You need to install a GPU-appropriate build of `paddleocr` for your hardware and CUDA version (https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/PaddleOCR-VL.html#manual-install-inference-engine-and-paddleocr).
 - `polyglot` requires `pyicu`, and `pyicu` usually needs ICU libraries installed on your OS.
 - For OCR extraction, have the PaddleOCR GenAI vLLM server running in the background with Docker:
 
