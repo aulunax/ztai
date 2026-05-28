@@ -132,7 +132,7 @@ if __name__ == "__main__":
 
     sites_to_process = None
     if args.site == "all":
-        sites_to_process = ["czasopisma", "journals", "pressto"] # sejm is not working great
+        sites_to_process = ["czasopisma", "journals", "pressto", "sejm"]
     else:
         sites_to_process = [args.site]
 
