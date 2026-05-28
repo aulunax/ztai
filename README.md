@@ -2,6 +2,19 @@
 
 This project contains a web scraping script `scraper.py` configured to crawl and extract data from various sites.
 
+## Prerequisites
+
+- You may need to install a GPU-appropriate build of `paddleocr` for your hardware and CUDA version.
+- `polyglot` requires `pyicu`, and `pyicu` usually needs ICU libraries installed on your OS.
+- For OCR extraction, have the PaddleOCR GenAI vLLM server running in the background with Docker:
+
+```bash
+docker run -it --rm --gpus all -p 8119:8119 \
+  -v $(pwd)/vllm_config.yml:/tmp/vllm_config.yml:ro \
+  ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-genai-vllm-server:latest-nvidia-gpu-offline \
+  paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --host 0.0.0.0 --port 8119 --backend vllm --backend_config /tmp/vllm_config.yml
+```
+
 ## Usage
 
 You can run the scraper using Python from the command line:
