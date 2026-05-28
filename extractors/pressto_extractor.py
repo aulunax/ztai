@@ -14,26 +14,6 @@ from .extractor import Extractor
 logging.getLogger("polyglot.detect.base").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# Tuning constants for size grouping and annotation filtering.
-SIZE_TOLERANCE = 0.8 # 0.05
-SEPARATOR_LINEWIDTH = 0.5
-NEWLINE_LINEWIDTH = 2.0
-ANNOTATION_MAX_SIZE = 7.0
-ANNOTATION_BASELINE_DELTA = 3.0
-STOP_MARKERS = ["references / bibliografia", "summary"]
-LINE_Y_TOLERANCE = 2.0
-TABLE_START_RE = re.compile(
-    r"^(tabela|rysunek|wykres|schemat|mapa)\s+\d+\s?$",
-    re.IGNORECASE,
-)
-SOURCE_RE = re.compile(r"^źródło:", re.IGNORECASE)
-CITATION_STOP_RE = re.compile(r",\s*[A-ZĄĆĘŁŃÓŚŹŻ]\.\s+.*\(\d{4}\)")
-CITATION_STOP_MARKER = "__STOP_CITATION__"
-LANGDETECT_LOG_NAME = "langdetect_removed.txt"
-MIN_LANGDETECT_CHARS = 500
-BAD_FRAGMENT_LOG_NAME = "bad_fragments.log"
-
-
 ARTICLE_VIEW_RE = re.compile(r"/article/view/(\d+)")
 
 class PresstoExtractor(Extractor):
@@ -68,40 +48,6 @@ class PresstoExtractor(Extractor):
         article_id = self._article_id_from_url(article.url) or f"idx_{index + 1:04d}"
         folder_name = f"{index + 1:04d}_{self._safe_path_part(article_id)}"
         return root / folder_name
-
-    def _filter_english_lines(
-        self,
-        lines: list[tuple[str, int]],
-        pdf_path: Path,
-        log_path: Path,
-    ) -> list[str]:
-        kept: list[str] = []
-        removed: list[tuple[int, str, str]] = []
-
-        for line, page_no in lines:
-            if not line.strip():
-                kept.append(line)
-                continue
-            try:
-                detector = Detector(line, quiet=True)
-                langs = detector.languages
-                lang = langs[0].code if langs else None
-            except Exception:
-                kept.append(line)
-                continue
-            probs = ",".join(f"{item.code}:{item.confidence:.3f}" for item in langs)
-            if lang == "en" and langs[0].confidence >= 90.0:
-                removed.append((page_no, line, probs))
-                continue
-            kept.append(line)
-
-        if removed:
-            with open(log_path, "a", encoding="utf-8") as f:
-                for page_no, line, probs in removed:
-                    f.write(f"{pdf_path.parent.name}\tpage {page_no}\t{probs}\t{line}\n")
-                f.write("\n")
-
-        return kept
 
     def extract(self, data, limit: int = None, start_at_index: int = 0):
         self.logger.info("Phase 1: downloading PDFs")

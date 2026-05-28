@@ -124,10 +124,6 @@ class Extractor(ABC):
             if cut_index is not None:
                 filtered_blocks = filtered_blocks[:cut_index]
 
-            with Path("test_paddle_output_my.json").open("w", encoding="utf-8") as f:
-                json.dump(filtered_blocks, f, ensure_ascii=False, indent=2)
-
-
             # remove english
             blocks_no_english = []
             removed = []
@@ -182,18 +178,6 @@ class Extractor(ABC):
             text_output = "\n\n".join(text for text in merged_text_blocks)
 
             return text_output
-
-            with Path("test_paddle_output_my.json").open("w", encoding="utf-8") as f:
-                json.dump(pdf_full, f, ensure_ascii=False, indent=2)
-
-            for res in output:
-                print("a")
-                res.save_to_json(save_path="test_paddle_output.json")  # get the structured result as a dict
-                res.save_to_markdown(save_path="test_paddle_output.md")
-
-            # save output to file
-            with Path("test_paddle_output_my.json").open("w", encoding="utf-8") as f:
-                json.dump(pdf_full, f, ensure_ascii=False, indent=2)
 
         except Exception as exc:
             self.logger.warning("PaddleOCR extraction failed for %s: %s", pdf_path, exc)

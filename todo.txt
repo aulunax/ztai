@@ -1,2 +1,0 @@
-- for journals crawler, make sure to not count articles that are not actually articles (TOC, some other stuff)
-- add pdf_link field to the json, currently article_url is pdf
